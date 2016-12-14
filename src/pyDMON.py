@@ -56,6 +56,9 @@ import psutil
 from logging.handlers import RotatingFileHandler
 import time
 from datetime import datetime
+import glob
+import multiprocessing
+#from threadRequest import getStormLogs
 
 # directory Location
 outDir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output')
@@ -71,7 +74,7 @@ esDir = '/opt/elasticsearch'
 lsCDir = '/etc/logstash/conf.d/'
 
 # D-Mon Supported frameworks
-lFrameworks = ['hdfs', 'yarn', 'spark', 'storm']
+lFrameworks = ['hdfs', 'yarn', 'spark', 'storm', 'cassandra', 'mongodb']
 
 # app = Flask("D-MON")
 # api = Api(app, version='0.2.0', title='DICE MONitoring API',
@@ -82,7 +85,7 @@ lFrameworks = ['hdfs', 'yarn', 'spark', 'storm']
 # dmon = api.namespace('dmon', description='D-MON operations')
 
 #Initialize detect service
-servDet=DetectBDService()
+servDet = DetectBDService()
 
 # argument parser
 dmonAux = api.parser()
@@ -107,6 +110,21 @@ queryES = api.model('query details Model', {
     'index': fields.String(required=False, default='logstash-*', description='Name of ES Core index')
 })
 
+queryESEnhanced = api.model('aggregated query details Model', {
+    'fname': fields.String(required=False, default="output", description='Name of output file.'),
+    'interval': fields.String(required=False, default="10s", description='Aggregation interval.'),
+    'size': fields.Integer(required=True, default=0, description='Number of record'),
+    'tstart': fields.Integer(required=True, default="now-1d", description='Start Date'),
+    'tstop': fields.Integer(required=False, default="now", description='Stop Date'),
+    'aggregation': fields.String(required=False, default="system", description='Aggregation'),
+    'index': fields.String(required=False, default='logstash-*', description='Name of ES Core index')
+})
+
+#Nested ENhanced JSON input
+dDMONQueryEnh = api.model('queryESEnh Model', {
+    'DMON':fields.Nested(queryESEnhanced, description="Query details")
+})
+
 # Nested JSON input
 dMONQuery = api.model('queryES Model', {
     'DMON': fields.Nested(queryES, description="Query details")
@@ -121,6 +139,8 @@ nodeSubmitCont = api.model('Submit Node Model Info', {
     'password': fields.String(required=False, description="Node Password"),
     'LogstashInstance': fields.String(required=False, description='Logstash Server Endpoint')
 })
+
+
 
 nodeSubmit = api.model('Submit Node Model', {
     'Nodes': fields.List(fields.Nested(nodeSubmitCont, required=True, description="Submit Node details"))
@@ -220,6 +240,14 @@ yarnHistorySettings = api.model('Settings for Yarn history server', {
     'Polling': fields.String(required=False, default=30, description='History Server Polling Period')
 })
 
+mongoDBConf = api.model('Settings for MongoDB', {
+    'MongoHost': fields.String(required=True, default='127.0.0.1', description='MongoDB Host'),
+    'MongoPort': fields.String(required=True, default='27017', description='MongoDB Port'),
+    'MongoUser': fields.String(required=False, default='', description='MongoDB User'),
+    'MongoPassword': fields.String(required=False, default='27017', description='MongoDB Password'),
+    'MongoDBs': fields.String(required=False, default='admin', description='MongoDBs')
+})
+
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(baseDir, 'dmon.db')
 app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
 db.create_all()
@@ -240,14 +268,30 @@ class DmonLog(Resource):
 @dmon.route('/v1/observer/applications')
 class ObsApplications(Resource):
     def get(self):
-        return 'Returns a list of all applications from YARN.'
+        qApps = db.session.query(dbApp.appName, dbApp.appVersion, dbApp.startTime, dbApp.stopTime, dbApp.jobID).all()
+        appDict = {}
+        for a in qApps:
+            appDict[a[0]] = {'ver': a[1], 'start': a[2], 'stop': a[3], 'status': a[4]}
+        response = jsonify(appDict)
+        response.status_code = 200
+        return response
 
 
 @dmon.route('/v1/observer/applications/<appID>')
 @api.doc(params={'appID': 'Application identification'})
 class ObsAppbyID(Resource):
     def get(self, appID):
-        return 'Returns information on a particular YARN applicaiton identified by ' + appID + '!'
+        qApp = dbApp.query.filter_by(appName=appID).first()
+        if qApp is None:
+            response = jsonify({'Status': 'Warning', 'Message': appID + ' not registered'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [INFO] Application %s is not registered',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), )
+            return response
+        # todo sync with dev brach to add missing code
+        response = jsonify({qApp.appName: {'ver': qApp.appVersion, 'start': qApp.startTime, 'stop': qApp.stopTime, 'status': qApp.jobID}})
+        response.status_code = 200
+        return response
 
 
 @dmon.route('/v1/observer/nodes')
@@ -264,7 +308,9 @@ class NodesMonitored(Resource):
             return response
         for nl in nodesAll:
             nodeDict = {}
-            print >> sys.stderr, nl[0]
+            app.logger.info('[%s] : [INFO] Nodes - > %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(nl[0]))
+            # print >> sys.stderr, nl[0]
             nodeDict.update({nl[0]: nl[1]})
             nodeList.append(nodeDict)
         response = jsonify({'Nodes': nodeList})
@@ -345,6 +391,13 @@ class QueryEsCore(Resource):
                                 'Message': 'Request has empty payload'})
             response.status_code = 417
             app.logger.error('[%s] : [ERROR] Empty payload received for query, returned error 417',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+        if 'queryString' not in request.json['DMON']:
+            response = jsonify({'Status': 'No queryString',
+                                'Message': 'Query string not found in payload'})
+            response.status_code = 404
+            app.logger.error('[%s] : [ERROR] Empty queryString received for query, returned error 404',
                              datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             return response
         if 'tstop' not in request.json['DMON']:
@@ -460,10 +513,182 @@ class QueryEsCore(Resource):
                 return Response(resOSLC, mimetype='application/rdf+xml')
 
 
+@dmon.route('/v2/observer/query/<ftype>')
+@api.doc(params={'ftype': 'Output type'})
+class QueryEsEnhancedCore(Resource):
+    @api.expect(dDMONQueryEnh)
+    def post(self, ftype):
+        supportType = ["csv", "json"]
+        if ftype not in supportType:
+            response = jsonify({'Supported types': supportType, "Submitted Type": ftype})
+            response.status_code = 415
+            app.logger.warn('[%s] : [WARN] Unsuported output type %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), ftype)
+            return response
+        if request.json is None:
+            response = jsonify({'Status': 'Empty payload',
+                                'Message': 'Request has empty payload'})
+            response.status_code = 417
+            app.logger.error('[%s] : [ERROR] Empty payload received for query, returned error 417',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+
+        if 'aggregation' not in request.json['DMON']:
+            response = jsonify({'Status': 'Missing aggregation', 'Message': 'Aggregation must be defined'})
+            response.status_code = 400
+            app.logger.error('[%s] : [ERROR] Query missing aggregation field',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+
+        supportedAggregation = ['system', 'yarn', 'spark', 'storm']
+        if request.json['DMON']['aggregation'] not in supportedAggregation:
+            response = jsonify({'Supported aggregation': supportedAggregation, "Submitted Type": request.json['DMON']['aggregation']})
+            response.status_code = 415
+            app.logger.warn('[%s] : [WARN] Unsuported aggregation  %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), request.json['DMON']['aggregation'])
+            return response
+        # {
+        #     "DMON": {
+        #         "aggregation": "system",
+        #         "fname": "output",
+        #         "index": "logstash-*",
+        #         "size": 0,
+        #         "tstart": "now-1d",
+        #         "tstop": "now"
+        #     }
+        # }
+
+        if 'index' not in request.json['DMON']:
+            index = 'logstash-*'
+        else:
+            index = request.json['DMON']['index']
+
+        app.logger.info('[%s] : [INFO] Using index  %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), index)
+
+        if 'size' not in request.json['DMON']:
+            size = 0
+        else:
+            size = request.json['DMON']['size']
+        app.logger.info('[%s] : [INFO] Using size  %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), size)
+
+        if 'tstop' and 'tstart' not in request.json['DMON']:
+            response = jsonify({'Status': 'Missing time interval declaration', 'Message': 'Both tstart and tstop must be defined'})
+            response.status_code = 400
+            app.logger.error('[%s] : [ERROR] Time interval not defined properly in request -> %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(request.json))
+            return response
+
+        if 'interval' not in request.json['DMON']:
+            interval = '10s'
+        else:
+            interval = request.json['DMON']['interval']
+
+        app.logger.info('[%s] : [INFO] Interval set to %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), interval)
+
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            response = jsonify({'Status': 'Not found', 'Message': 'No es Core instance registered'})
+            response.status_code = 503
+            app.logger.info('[%s] : [INFO] ES core instance not registered',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+
+        dqengine = QueryEngine(qES.hostIP)
+        qNode = dbNodes.query.all()
+        if qNode is None:
+            response = jsonify({'Status': 'No registered nodes'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] No nodes found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+        nodeList = []
+        for nodes in qNode:
+            nodeList.append(nodes.nodeFQDN)
+        if request.json['DMON']['aggregation'] == 'system':
+            # nodes, tfrom, to, qsize, qinterval, index)
+            df_system = dqengine.getSystemMetrics(nodeList, request.json['DMON']['tstart'], request.json['DMON']['tstop'], int(size), interval, index)
+            # df_system = dqengine.getSystemMetrics(nodeList, request.json['DMON']['tstart'],
+            #                                       request.json['DMON']['tstop'], 0, '10s', 'logstash-*')
+            if isinstance(df_system, int):
+                response = jsonify({'Status': 'error', 'Message': 'response is null'})
+                response.status_code = 500
+                app.logger.error('[%s] : [ERROR] System metrics return 0',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                return response
+            if ftype == 'json':
+                response = jsonify(dqengine.toDict(df_system))
+                response.status_code = 200
+                return response
+            if ftype == 'csv':
+                if not 'fname' in request.json['DMON']:
+                    fileName = 'output.csv'
+                else:
+                    fileName = '%s.csv' % request.json['DMON']['fname']
+                csvOut = os.path.join(outDir, fileName)
+                dqengine.toCSV(df_system, csvOut)
+                # with open(csvOut, 'r') as f:
+                #     read_data = f.read()
+                try:
+                    csvfile = open(csvOut, 'r')
+                except EnvironmentError:
+                    response = jsonify({'EnvError': 'file not found'})
+                    response.status_code = 500
+                    app.logger.error('[%s] : [ERROR] CSV file not found',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                    return response
+                return send_file(csvfile, mimetype='text/csv', as_attachment=True)
+        if request.json['DMON']['aggregation'] == 'yarn':
+            df_dfs = dqengine.getDFS(request.json['DMON']['tstart'], request.json['DMON']['tstop'], int(size),
+                                     interval, index)
+            df_cluster = dqengine.getCluster(request.json['DMON']['tstart'], request.json['DMON']['tstop'],
+                                             int(size), interval, index)
+            df_name_node = dqengine.getNameNode(request.json['DMON']['tstart'], request.json['DMON']['tstop'],
+                                                int(size), interval, index)
+
+            nm_merged, jvmnn_merged, shuffle_merged = dqengine.getNodeManager(nodeList, request.json['DMON']['tstart'],
+                                                                              request.json['DMON']['tstop'], int(size),
+                                                                              interval, index)
+            df_dn_merged = dqengine.getDataNode(nodeList, request.json['DMON']['tstart'], request.json['DMON']['tstop'],
+                                                int(size), interval, index)
+            listDF = [df_dfs, df_cluster, df_name_node, nm_merged, jvmnn_merged, shuffle_merged, df_dn_merged]
+            df_merged = dqengine.merge(listDF)
+            if ftype == 'json':
+                response = jsonify(dqengine.toDict(df_merged))
+                response.status_code = 200
+                return response
+            if ftype == 'csv':
+                if not 'fname' in request.json['DMON']:
+                    fileName = 'output.csv'
+                else:
+                    fileName = '%s.csv' % request.json['DMON']['fname']
+                csvOut = os.path.join(outDir, fileName)
+                dqengine.toCSV(df_system, csvOut)
+                # with open(csvOut, 'r') as f:
+                #     read_data = f.read()
+                try:
+                    csvfile = open(csvOut, 'r')
+                except EnvironmentError:
+                    response = jsonify({'EnvError': 'file not found'})
+                    response.status_code = 500
+                    app.logger.error('[%s] : [ERROR] CSV file not found',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                    return response
+                return send_file(csvfile, mimetype='text/csv', as_attachment=True)
+            if request.json['DMON']['aggregation'] == 'spark':
+                return "Not for this version"
+            if request.json['DMON']['aggregation'] == 'storm':
+                return "Not for this version"
+
+
+
+
 @dmon.route('/v1/overlord')
 class OverlordInfo(Resource):
     def get(self):
-        response = jsonify({'Status': 'Current version is 0.2.0'})
+        response = jsonify({'Status': 'Current version is 0.2.1'})
         response.status_code = 200
         return response
 
@@ -555,13 +780,59 @@ class OverlordFrameworkProperties(Resource):
             rSparkProp = open(propSparkFile, 'r')
             return send_file(rSparkProp, mimetype='text/x-java-properties',
                              as_attachment=True)  # TODO: Swagger returns same content each time, however sent file is correct
+        if fwork == 'cassandra':
+            return "Cassandra conf" #todo
+        if fwork == 'mongodb':
+            return "mongodb conf"
 
 
-@dmon.route('/v1/overlord/applicaiton/<appID>')
+@dmon.route('/v1/overlord/application/<appID>')
 @api.doc(params={'appID': 'Application identification'})
 class OverlordAppSubmit(Resource):
-    def put(self):
-        return 'Registers an applicaiton with DMON and creates a unique tag!'
+    def put(self, appID):
+        startT = datetime.utcnow()
+        qApp = dbApp.query.filter_by(appName=appID).first()
+        if qApp is None:
+            # Sort by id desc
+            lastApp = db.session.query(dbApp.id, dbApp.appName).order_by(dbApp.id.desc()).first()
+            if lastApp is None:
+                app.logger.info('[%s] : [INFO] No previouse application registered', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            else:
+                # Get id of last inserted app, ordering is based in where lastApp is decalred; [0]-> dbApp.id
+                app.logger.info('[%s] : [INFO] Last registered applications id %s name %s, setting to inactive',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), lastApp[0],
+                                lastApp[1])
+                qlastApp = dbApp.query.filter_by(appName=lastApp[1]).first()
+                qlastApp.stopTime = startT
+                qlastApp.jobID = 'STOPPED'
+                db.session.add(qlastApp)
+            appl = dbApp(appName=appID, appVersion=1, jobID='ACTIVE', startTime=startT, stopTime=None)
+            db.session.add(appl)
+            app.logger.info('[%s] : [INFO] Added new application %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), appID)
+            response = jsonify({'Status': 'Registered Application', 'App': appID, 'Start': startT})
+            response.status_code = 201
+        else:
+            newVer = int(qApp.appVersion) + 1
+            qApp.appVersion = newVer
+            qApp.startTime = startT
+            #check if it is marked as active if not set active and mark others as inactive
+            app.logger.info('[%s] : [INFO] Application %s has status %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qApp.appName, qApp.jobID)
+            if qApp.jobID == 'ACTIVE':
+                pass
+            else:
+                qApp.jobID = 'ACTIVE'
+                qActive = dbApp.query.filter_by(jobID='ACTIVE').first()
+                app.logger.info('[%s] : [INFO] Found other active application %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qActive.appName)
+                qActive.jobID = 'STOPPED'
+            db.session.add(qApp)
+            response = jsonify({'Status': 'Modified', 'App': appID, 'Version': qApp.appVersion})
+            app.logger.info('[%s] : [INFO] Modified application %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), appID)
+            response.status_code = 200
+        return response
 
 
 @dmon.route('/v1/overlord/core')
@@ -822,7 +1093,7 @@ class ClusterRoles(Resource):
                 response = jsonify({'Status': 'Node Name Error',
                                     'Message': 'Node' + n["NodeName"] + ' not found!'})
                 response.status_code = 404
-                app.logger.warrning('[%s] : [WARN] Node %s not found',
+                app.logger.warning('[%s] : [WARN] Node %s not found',
                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
                                     str(n["NodeName"]))
                 return response
@@ -1035,7 +1306,6 @@ class DetectStormRA(Resource):
                 response.status_code = 201
                 return response
 
-
         stormNodes = []
         for n in qNode:
             if "storm" in n.nRoles:
@@ -1054,7 +1324,6 @@ class DetectStormRA(Resource):
                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), resList)
         dmon = GreenletRequests(resList)
         nodeRes = dmon.parallelGet()
-
 
         topoIDs = {}
         for i in nodeRes:
@@ -1098,6 +1367,179 @@ class DetectStormRA(Resource):
         response.status_code = 201
         dmon.reset()
         return response
+
+
+@dmon.route('/v1/overlord/mongo')
+class MongoSettings(Resource):
+    def get(self):
+        qBDS = dbBDService.query.first()
+        if qBDS is None:
+            response = jsonify({'Status': 'No registered mongo settings'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] No mongo settings found found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+
+        if qBDS.mongoUser is None:
+            mUser = False
+        elif qBDS.mongoUser.strip():
+            mUser = True
+        else:
+            mUser = False
+        if qBDS.mongoPswd is None:
+            mPass = False
+        elif qBDS.mongoPswd.strip():
+            mPass = True
+        else:
+            mPass = False
+
+        response = jsonify({'MongoHost': qBDS.mongoHost, 'MongoPort': qBDS.mongoPort,
+                            'User': mUser, 'Password': mPass, 'MongoDBs': qBDS.mongoDBs})
+        response.status_code = 200
+        return response
+
+    @api.expect(mongoDBConf)
+    def put(self):
+        if not request.json:
+            abort(400)
+        requiredKeys = ['MongoHost', 'MongoPort']
+        for key in requiredKeys:
+            if key not in request.json:
+                response = jsonify({'Error': 'malformed request, missing key(s)'})
+                response.status_code = 400
+                app.logger.warning('[%s] : [WARN] Malformed Request, missing key(s)',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                return response
+        if 'MongoUser' not in request.json:
+            mUser = ''
+        else:
+            mUser = request.json['MongoUser']
+        if 'MongoPassword' not in request.json:
+            mPass = 'password'
+        else:
+            mPass = request.json['MongoPassword']
+        if 'MongoDBs' not in request.json:
+            dbs = 'admin'
+        else:
+            dbs = request.json['MongoDBs']
+        qBDS = dbBDService.query.first()
+        if qBDS is None:
+            # {'MongoHost': qBDS.mongoHost, 'MongoPort': qBDS.mongoPort,
+            #  'User': mUser, 'Password': mPass, 'MongoDBs': qBDS.mongoDBs})
+            e = dbBDService(mongoHost=request.json['MongoHost'], mongoPort=request.json['MongoPort'], mongoUser=mUser,
+                            mongoPswd=mPass, mongoDBs=dbs)
+            db.session.add(e)
+            db.session.commit()
+            response = jsonify({'Status': 'Added MongoDB Settings'})
+            response.status_code = 201
+            app.logger.info('[%s] : [INFO] Added MongoDB settings: Host-> %s, Port ->%s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                            str(request.json['MongoUser']), str(request.json['MongoPassword']))
+            return response
+        else:
+            qBDS.mongoHost = request.json['MongoHost']
+            qBDS.mongoPort = request.json['MongoPort']
+            qBDS.mongoUser = mUser
+            qBDS.mongoPswd = mPass
+            qBDS.mongoDBs = dbs
+            response = jsonify({'Status': 'Modified MongoDB Settings'})
+            response.status_code = 201
+            app.logger.info('[%s] : [INFO] Modified MongoDB settings: Host-> %s, Port ->%s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                            str(request.json['MongoUser']), str(request.json['MongoPassword']))
+            return response
+
+
+@dmon.route('/v1/overlord/storm/logs')
+class StormLogs(Resource):
+    def get(self):
+        workerFile = 'workerlogs_*.tar'
+        lFile = []
+        for name in glob.glob(os.path.join(outDir, workerFile)):
+            path, filename = os.path.split(name)
+            lFile.append(filename)
+
+        response = jsonify({'StormLogs': lFile})
+        response.status_code = 200
+        app.logger.info('[%s] : [INFO] Available Storm logs %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(lFile))
+        return response
+
+    def post(self):
+        nodeList = []
+        nodesAll = db.session.query(dbNodes.nodeFQDN, dbNodes.nRoles, dbNodes.nodeIP).all()
+        try:
+            global backProc
+            alive = backProc.is_alive()
+            if alive:
+                response = jsonify({'Status': 'Only one background process is permited', 'PID': str(backProc.pid),
+                                    'BProcess': 'Active'})
+                response.status_code = 409
+                return response
+        except Exception as inst:
+            app.logger.warning('[%s] : [WARN] First startup detected, skipping backgroundproces alive check',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+
+        if nodesAll is None:
+            response = jsonify({'Status': 'No monitored nodes found'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] No registered nodes found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+        for nl in nodesAll:
+            app.logger.info('[%s] : [INFO] Node name -> %s ',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(nl[0]))
+
+            if 'storm' in nl[1].split(', '): #TODO modify to STORM
+                nodeList.append(nl[2])
+
+        if not nodeList:
+            response = jsonify({'Status': 'No nodes with role storm found'})
+            response.status_code = 404
+            return response
+
+        stormLogAgent = AgentResourceConstructor(nodeList, '5222')
+        resourceList = stormLogAgent.stormLogs()
+
+        backProc = multiprocessing.Process(target=getStormLogsGreen, args=(resourceList, ))
+        backProc.daemon = True
+        backProc.start()
+        response = jsonify({'Status': 'Started background process', 'PID': str(backProc.pid)})
+        response.status_code = 201
+        return response
+
+
+@dmon.route('/v1/overlord/storm/logs/active')
+class StormLogFetchActive(Resource):
+    def get(self):
+        try:
+            pid = str(backProc.pid)
+            alive = str(backProc.is_alive())
+        except Exception as inst:
+            app.logger.warning('[%s] : [WARN] No Background proc detected with %s and %s ',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'No background process detected'})
+            response.status_code = 404
+            return response
+        response = jsonify({'PID': pid,
+                            'Alive': alive})
+        response.status_code = 200
+        return response
+
+
+@dmon.route('/v1/overlord/storm/logs/<log>')
+class StormLogsLog(Resource):
+    def get(self, log):
+        if not os.path.isfile(os.path.join(outDir, log)):
+            response = jsonify({'Status': 'Not found',
+                                'StormLog': log})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] Strom log %s not found',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), log)
+            return response
+        app.logger.info('[%s] : [INFO] Served Storm log %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), log)
+        return send_from_directory(outDir, log, as_attachment=True, mimetype='application/tar')
 
 
 @dmon.route('/v1/overlord/detect/yarn')
@@ -1192,6 +1634,145 @@ class DetectSparkHS(Resource):
         return 'Define or modify spark history server endpoint'
 
 
+@dmon.route('/v1/overlord/history/yarn')
+class YarnHistoryServer(Resource):
+    def get(self):
+        qBDService = dbBDService.query.first()
+        if qBDService is None:
+            app.logger.warning('[%s] : [WARN] No entry for Yarn History server found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'No Yarn History server entry found'})
+            response.status_code = 404
+            return response
+        elif qBDService.yarnHEnd == 'None':
+            app.logger.warning('[%s] : [WARN] Yarn History server not registered',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Yarn History server not registered'})
+            response.status_code = 404
+            return response
+        else:
+            try:
+                yarnJobsStatus, yarnJobs = getYarnJobs(qBDService.yarnHEnd, qBDService.yarnHPort)
+            except Exception as inst:
+                app.logger.warning('[%s] : [WARN] Yarn History server not responding at %s with port %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qBDService.yarnHEnd, str(qBDService.yarnHPort))
+                response = jsonify({'Status': 'Yarn History server not responding'})
+                response.status_code = 408
+                return response
+
+            return yarnJobs
+
+
+@dmon.route('/v1/overlord/history/yarn/jobs')
+class YarnHistoryServerJobs(Resource):
+    def get(self):
+        qBDService = dbBDService.query.first()
+        if qBDService is None:
+            app.logger.warning('[%s] : [WARN] No entry for Yarn History server found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'No Yarn History server entry found'})
+            response.status_code = 404
+            return response
+        elif qBDService.yarnHEnd == 'None':
+            app.logger.warning('[%s] : [WARN] Yarn History server not registered',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Yarn History server not registered'})
+            response.status_code = 404
+            return response
+        else:
+            try:
+                yarnJobsStatus, yarnJobs = getYarnJobs(qBDService.yarnHEnd, qBDService.yarnHPort)
+            except Exception as inst:
+                app.logger.warning('[%s] : [WARN] Yarn History server not responding at %s with port %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qBDService.yarnHEnd, str(qBDService.yarnHPort))
+                response = jsonify({'Status': 'Yarn History server not responding'})
+                response.status_code = 408
+                return response
+
+            try:
+                jStatJob = getYarnJobsStatistic(qBDService.yarnHEnd, qBDService.yarnHPort, yarnJobs)
+            except Exception as inst:
+                app.logger.warning('[%s] : [WARN] Yarn History server not responding at %s with port %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qBDService.yarnHEnd, str(qBDService.yarnHPort))
+                response = jsonify({'Status': 'Yarn History server not responding'})
+                response.status_code = 408
+                return response
+            #TODO: Stronger sync index with logstash server needed
+            # dindex = 'logstash-%s' %datetime.now().strftime("%Y.%m.%d")
+            qES = dbESCore.query.filter_by(MasterNode=1).first()
+            if qES is None:
+                response = jsonify({'Status': 'ES not registered'})
+                response.status_code = 404
+                app.logger.error('[%s] : [ERROR] ES core not registered into dmon', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                return response
+
+            try:
+                rIndex = dmonESIndexer(qES.hostIP, dmonindex='ystat', dmondoc_type='yarn_jobstat', docId='yarn-jobstat', body=jStatJob)
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Indexing failed with %s and %s',
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error while indexing'})
+                response.status_code = 503
+                return response
+            app.logger.info('[%s] : [INFO] Jobs indexed %s', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(rIndex))
+            # return rIndex
+            return jStatJob
+
+
+@dmon.route('/v1/overlord/history/yarn/jobs/tasks')
+class YarnHistoryServerJobTasks(Resource):
+    def get(self):
+        qBDService = dbBDService.query.first()
+        if qBDService is None:
+            app.logger.warning('[%s] : [WARN] No entry for Yarn History server found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'No Yarn History server entry found'})
+            response.status_code = 404
+            return response
+        elif qBDService.yarnHEnd == 'None':
+            app.logger.warning('[%s] : [WARN] Yarn History server not registered',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Yarn History server not registered'})
+            response.status_code = 404
+            return response
+        else:
+            try:
+                yarnJobsStatus, yarnJobs = getYarnJobs(qBDService.yarnHEnd, qBDService.yarnHPort)
+            except Exception as inst:
+                app.logger.warning('[%s] : [WARN] Yarn History server not responding at %s with port %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qBDService.yarnHEnd, str(qBDService.yarnHPort))
+                response = jsonify({'Status': 'Yarn History server not responding'})
+                response.status_code = 408
+                return response
+
+            try:
+                jStatTask = getYarnJobTasks(qBDService.yarnHEnd, qBDService.yarnHPort, yarnJobs)
+            except Exception as inst:
+                app.logger.warning('[%s] : [WARN] Yarn History server not responding at %s with port %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qBDService.yarnHEnd, str(qBDService.yarnHPort))
+                response = jsonify({'Status': 'Yarn History server not responding'})
+                response.status_code = 408
+                return response
+            qES = dbESCore.query.filter_by(MasterNode=1).first()
+            if qES is None:
+                response = jsonify({'Status': 'ES not registered'})
+                response.status_code = 404
+                app.logger.error('[%s] : [ERROR] ES core not registered into dmon', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                return response
+
+            try:
+                rIndex = dmonESIndexer(qES.hostIP, dmonindex='ystat', dmondoc_type='yarn_jobstasks', docId='yarn-jobstasks', body=jStatTask)
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Indexing failed with %s and %s',
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error while indexing'})
+                response.status_code = 503
+                return response
+            app.logger.info('[%s] : [INFO] Jobs indexed %s', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(rIndex))
+            # return rIndex
+            return jStatTask
+
+
 @dmon.route('/v1/overlord/nodes/<nodeFQDN>')
 @api.doc(params={'nodeFQDN': 'Nodes FQDN'})
 class MonitoredNodeInfo(Resource):
@@ -1210,7 +1791,7 @@ class MonitoredNodeInfo(Resource):
                 'IP': qNode.nodeIP,
                 'Monitored': qNode.nMonitored,
                 'OS': qNode.nodeOS,
-                'Key': qNode.nkey,  # TODO Chef client status, and CDH status
+                'Key': qNode.nkey,
                 'Roles': qNode.nRoles,
                 'LSInstance': qNode.nLogstashInstance
             })
@@ -1239,7 +1820,11 @@ class MonitoredNodeInfo(Resource):
         else:
             qNode.nodeIP = request.json['IP']
             qNode.nodeOS = request.json['OS']
-            qNode.nkey = request.json['Key']
+            if 'Key' not in request.json:
+                app.logger.warning('[%s] : [WARN] Key not changed for node  %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), nodeFQDN)
+            else:
+                qNode.nkey = request.json['Key']
             qNode.nPass = request.json['Password']
             qNode.nUser = request.json['User']
             if 'LogstashInstance' not in request.json:
@@ -1259,7 +1844,7 @@ class MonitoredNodeInfo(Resource):
             return response
 
     def post(self, nodeFQDN):
-        return "Bootstrap specified node!"
+        return "Bootstrap specified node!" #todo
 
     def delete(self, nodeFQDN):
         dNode = dbNodes.query.filter_by(nodeFQDN=nodeFQDN).first()
@@ -1519,68 +2104,114 @@ class ESCoreConfiguration(Resource):
             qESCore.nodename = request.json['NodeName']
             qESCore.clusterName = request.json['ESClusterName']
             if 'IP' not in request.json:
-                print >> sys.stderr, 'IP unchanged'
+                # print >> sys.stderr, 'IP unchanged'
+                app.logger.info('[%s] : [INFO] IP unchanged', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['IP'] == ip:
                 qESCore.hostIP = ip
             if 'NodePort' not in request.json:
-                print >> sys.stderr, 'NodePort unchanged'
+                # print >> sys.stderr, 'NodePort unchanged'
+                app.logger.info('[%s] : [INFO] NodePort unchanged', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['NodePort'] == nodePort:
                 qESCore.nodePort = nodePort
             if 'DataNode' not in request.json:
-                print >> sys.stderr, 'DataNode unchanged'
+                # print >> sys.stderr, 'DataNode unchanged'
+                app.logger.info('[%s] : [INFO] DataNode unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['DataNode'] == data:
                 qESCore.DataNode = data
-                print >> sys.stderr, 'DataNode set to ' + str(data)
+                # print >> sys.stderr, 'DataNode set to ' + str(data)
+                app.logger.info('[%s] : [INFO] DataNode set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(data))
             if 'ESCoreHeap' not in request.json:
-                print >> sys.stderr, 'ESCoreHeap unchanged'
+                # print >> sys.stderr, 'ESCoreHeap unchanged'
+                app.logger.info('[%s] : [INFO] ESCoreHeap unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['ESCoreHeap'] == ESHeap:
                 qESCore.ESCoreHeap = ESHeap
-                print >> sys.stderr, 'ESCoreHeap set to ' + ESHeap
+                # print >> sys.stderr, 'ESCoreHeap set to ' + ESHeap
+                app.logger.info('[%s] : [INFO] ESCoreHeap set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), ESHeap)
             if 'NumOfShards' not in request.json:
-                print >> sys.stderr, 'NumOfShards unchanged'
+                # print >> sys.stderr, 'NumOfShards unchanged'
+                app.logger.info('[%s] : [INFO] NumOfShards unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['NumOfShards'] == shards:
                 qESCore.NumOfShards = shards
-                print >> sys.stderr, 'NumOfShards set to ' + str(shards)
+                # print >> sys.stderr, 'NumOfShards set to ' + str(shards)
+                app.logger.info('[%s] : [INFO] NumOfShard set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(shards))
             if 'NumOfReplicas' not in request.json:
-                print >> sys.stderr, 'NumOfReplicas unchanged'
+                # print >> sys.stderr, 'NumOfReplicas unchanged'
+                app.logger.info('[%s] : [INFO] NumOfReplicas unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['NumOfReplicas'] == rep:
                 qESCore.NumOfReplicas = rep
-                print >> sys.stderr, 'NumOfReplicas set to ' + str(rep)
+                # print >> sys.stderr, 'NumOfReplicas set to ' + str(rep)
+                app.logger.info('[%s] : [INFO] NumOfReplicas set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(rep))
             if 'FieldDataCacheSize' not in request.json:
-                print >> sys.stderr, 'FieldDataCacheSize unchanged'
+                # print >> sys.stderr, 'FieldDataCacheSize unchanged'
+                app.logger.info('[%s] : [INFO] FieldDataCacheSize unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['FieldDataCacheSize'] == fdcs:
                 qESCore.FieldDataCacheSize = fdcs
-                print >> sys.stderr, 'FieldDataCacheSize set to ' + fdcs
+                # print >> sys.stderr, 'FieldDataCacheSize set to ' + fdcs
+                app.logger.info('[%s] : [INFO] FieldDataCacheSize set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), fdcs)
             if 'FieldDataCacheExpires' not in request.json:
-                print >> sys.stderr, 'FieldDataCacheExpires unchanged'
+                # print >> sys.stderr, 'FieldDataCacheExpires unchanged'
+                app.logger.info('[%s] : [INFO] FieldDataCacheExpires unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['FieldDataCacheExpires'] == fdce:
                 qESCore.FieldDataCacheExpires = fdce
-                print >> sys.stderr, 'FieldDataCacheExpires set to ' + fdce
+                app.logger.info('[%s] : [INFO] FieldDataCacheExpires set to',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), fdce)
+                # print >> sys.stderr, 'FieldDataCacheExpires set to ' + fdce
             if 'FieldDataCacheFilterSize' not in request.json:
-                print >> sys.stderr, 'FieldDataCacheFilterSize unchanged'
+                # print >> sys.stderr, 'FieldDataCacheFilterSize unchanged'
+                app.logger.info('[%s] : [INFO] FieldDataCacheFilterSize unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['FieldDataCacheFilterSize'] == fdcfs:
                 qESCore.FieldDataCacheFilterSize = fdcfs
-                print >> sys.stderr, 'FieldDataCacheFilterSize set to ' + fdcfs
+                # print >> sys.stderr, 'FieldDataCacheFilterSize set to ' + fdcfs
+                app.logger.info('[%s] : [INFO] FieldDataCacheFilterSize set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), fdcfs)
             if 'FieldDataCacheFilterExpires' not in request.json:
-                print >> sys.stderr, 'FieldDataCacheFilterExpires unchanged'
+                # print >> sys.stderr, 'FieldDataCacheFilterExpires unchanged'
+                app.logger.info('[%s] : [INFO] FieldDataCacheFilterExpires unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['FieldDataCacheFilterExpires'] == fdcfe:
                 qESCore.FieldDataCacheFilterExpires = fdcfe
-                print >> sys.stderr, 'FieldDataCacheFilterExpires set to ' + fdcfe
+                # print >> sys.stderr, 'FieldDataCacheFilterExpires set to ' + fdcfe
+                app.logger.info('[%s] : [INFO] FieldDataCacheFilterExpires set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), fdcfe)
             if 'IndexBufferSize' not in request.json:
-                print >> sys.stderr, 'IndexBufferSize unchanged'
+                # print >> sys.stderr, 'IndexBufferSize unchanged'
+                app.logger.info('[%s] : [INFO] IndexBufferSize unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['IndexBufferSize'] == ibs:
                 qESCore.IndexBufferSize = ibs
-                print >> sys.stderr, 'IndexBufferSize set to ' + ibs
+                # print >> sys.stderr, 'IndexBufferSize set to ' + ibs
+                app.logger.info('[%s] : [INFO] IndexBufferSize set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), ibs)
             if 'MinShardIndexBufferSize' not in request.json:
-                print >> sys.stderr, 'MinShardIndexBufferSize unchanged'
+                # print >> sys.stderr, 'MinShardIndexBufferSize unchanged'
+                app.logger.info('[%s] : [INFO] MinShardIndexBufferSize unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['MinShardIndexBufferSize'] == msibs:
                 qESCore.MinShardIndexBufferSize = msibs
-                print >> sys.stderr, 'MinShardIndexBufferSize set to ' + msibs
+                # print >> sys.stderr, 'MinShardIndexBufferSize set to ' + msibs
+                app.logger.info('[%s] : [INFO] MinShardIndexBufferSize set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), msibs)
             if 'MinIndexBufferSize' not in request.json:
-                print >> sys.stderr, 'MinIndexBufferSize unchanged'
+                # print >> sys.stderr, 'MinIndexBufferSize unchanged'
+                app.logger.info('[%s] : [INFO] MinIndexBufferSize unchanged',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             elif request.json['MinIndexBufferSize'] == mibs:
                 qESCore.MinIndexBufferSize = mibs
-                print >> sys.stderr, 'MinIndexBufferSize set to ' + mibs
+                # print >> sys.stderr, 'MinIndexBufferSize set to ' + mibs
+                app.logger.info('[%s] : [INFO] MinIndexBufferSize set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), mibs)
             db.session.commit()
             response = jsonify({'Updated': 'ES config for ' + request.json["HostFQDN"]})
             response.status_code = 201
@@ -1658,10 +2289,24 @@ class ESCoreController(Resource):
             else:
                 app.logger.warning('[%s] : ES Core service not found at PID %s, setting to failed',
                                    datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(hosts[7]))
-                #hosts.ESCorePID = 0
-                #hosts.ESCoreStatus = 'unknown'
-                confDict['Status'] = 'failed'  #TODO: Document failed message if PID is not assigned to an ES Instance
-                confDict['PID'] = 0
+                pidESLoc = os.path.join(pidDir, 'elasticsearch.pid')
+                if os.path.isfile(pidESLoc):
+                    esPIDf = check_proc(pidESLoc)
+                    if checkPID(esPIDf):
+                        confDict['Stats'] = 'detached'
+                        confDict['PID'] = esPIDf
+                        app.logger.warning('[%s] : Detached ES Core service found at PID %s, setting to detached',
+                                           datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                                           str(esPIDf))
+                else:
+                    #hosts.ESCorePID = 0
+                    #hosts.ESCoreStatus = 'unknown'
+                    # todo status detached if pid only in file not in sqlite, read pid from file
+                    confDict['Status'] = 'unknown'  #TODO: Document failed message if PID is not assigned to an ES Instance
+                    confDict['PID'] = 0
+                    app.logger.warning('[%s] : ES Core service not found, setting to unknown',
+                                       datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                                       str(esPIDf))
             confDict['MasterNode'] = hosts[8]
             confDict['DataNode'] = hosts[9]
             confDict['NumOfShards'] = hosts[10]
@@ -1698,7 +2343,11 @@ class ESCoreController(Resource):
             template = templateEnv.get_template(esTemp)
         # print >>sys.stderr, template
         except:
-            return "Tempalte file unavailable!"
+            response = jsonify({'Status': 'Error', 'Message': 'Tempalte file unavailable!'})
+            response.status_code = 500
+            app.logger.error("[%s] : [ERROR] Cannot load es core template at location %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), esTemp)
+            return response
 
         infoESCore = {"clusterName": qESCore.clusterName, "nodeName": qESCore.nodeName, "esLogDir": logDir,
                       "MasterNode": qESCore.MasterNode, "DataNode": qESCore.DataNode,
@@ -1728,11 +2377,16 @@ class ESCoreController(Resource):
         esPid = 0
         try:
             esPid = subprocess.Popen('/opt/elasticsearch/bin/elasticsearch',
-                                     stdout=subprocess.PIPE).pid  # TODO: Try -p to set pid file location
+                                     stdout=subprocess.PIPE, close_fds=True).pid  # TODO: Try -p to set pid file location and -d for daemon
         except Exception as inst:
-            print >> sys.stderr, 'Error while starting elasticsearch'
-            print >> sys.stderr, type(inst)
-            print >> sys.stderr, inst.args
+            # print >> sys.stderr, 'Error while starting elasticsearch'
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
+            app.logger.error("[%s] : [ERROR] Cannot start ES Core service with %s and %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'Error', 'Message': 'Cannot start ES Core'})
+            response.status_code = 500
+            return response
         qESCore.ESCorePID = esPid
         qESCore.ESCoreStatus = 'Running'
         # ES core pid location
@@ -1750,9 +2404,265 @@ class ESCoreController(Resource):
         return response
 
 
-@dmon.route('/v1/overlord/core/es/status/<intComp>/property/<intProp>')
+@dmon.route('/v2/overlord/core/es')
+class ESCoreControllerInit(Resource):
+    def post(self):
+        templateLoader = jinja2.FileSystemLoader(searchpath="/")
+        templateEnv = jinja2.Environment(loader=templateLoader)
+        esTemp = os.path.join(tmpDir, 'elasticsearch.tmp')  # tmpDir+"/collectd.tmp"
+        esfConf = os.path.join(cfgDir, 'elasticsearch.yml')
+        pidESLoc = os.path.join(pidDir, 'elasticsearch.pid')
+        qESCore = dbESCore.query.filter_by(MasterNode=1).first()  # TODO -> curerntly only generates config file for master node
+        if qESCore is None:
+            response = jsonify({"Status": "No master ES instances found!"})
+            response.status_code = 500
+            return response
+
+        # if checkPID(qESCore.ESCorePID) is True:
+        #     subprocess.call(["kill", "-15", str(qESCore.ESCorePID)])
+
+        try:
+            template = templateEnv.get_template(esTemp)
+        except:
+            response = jsonify({'Status': 'Error', 'Message': 'Tempalte file unavailable!'})
+            response.status_code = 500
+            app.logger.error("[%s] : [ERROR] Cannot load es core template at location %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), esTemp)
+            return response
+
+        infoESCore = {"clusterName": qESCore.clusterName, "nodeName": qESCore.nodeName, "esLogDir": logDir,
+                      "MasterNode": qESCore.MasterNode, "DataNode": qESCore.DataNode,
+                      "NumberOfShards": qESCore.NumOfShards, "NumberOfReplicas": qESCore.NumOfReplicas,
+                      "IndexBufferSize": qESCore.IndexBufferSize,
+                      "MinShardIndexBufferSize": qESCore.MinShardIndexBufferSize,
+                      "MinIndexBufferSize": qESCore.MinIndexBufferSize,
+                      "FieldDataCacheSize": qESCore.FieldDataCacheSize,
+                      "FieldDataCacheExpires": qESCore.FieldDataCacheExpires,
+                      "FieldDataCacheFilterSize": qESCore.FieldDataCacheFilterSize,
+                      "FieldDataCacheFilterExpires": qESCore.FieldDataCacheFilterExpires,
+                      "ESCoreDebug": qESCore.ESCoreDebug}
+        esConf = template.render(infoESCore)
+        qESCore.conf = esConf
+        # print >>sys.stderr, esConf
+        db.session.commit()
+        esCoreConf = open(esfConf, "w+")
+        esCoreConf.write(esConf)
+        esCoreConf.close()
+
+        # TODO find better solution
+        os.system('rm -rf /opt/elasticsearch/config/elasticsearch.yml')
+        os.system('cp ' + esfConf + ' /opt/elasticsearch/config/elasticsearch.yml ')
+
+        os.environ['ES_HEAP_SIZE'] = qESCore.ESCoreHeap
+
+        #check for running detached es core
+        if os.path.isfile(pidESLoc):
+            esPIDf = check_proc(pidESLoc)
+        else:
+            esPIDf = 0
+
+        if esPIDf != qESCore.ESCorePID:
+            app.logger.warning("[%s] : [WARN] Conflicting PID values found, detached pid -> %s, attached -> %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(esPIDf),
+                               str(qESCore.ESCorePID))
+
+        if checkPID(qESCore.ESCorePID) is True:
+            try:
+                subprocess.check_call(["service", "dmon-es", "restart", qESCore.ESCoreHeap])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot restart ES Core service with %s and %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart ES Core'})
+                response.status_code = 500
+                return response
+            esPID = check_proc(pidESLoc)
+            if not esPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
+                response.status_code = 500
+                return response
+            qESCore.ESCorePID = esPID
+            qESCore.ESCoreStatus = 'Running'
+            response = jsonify({'Status': 'ES Core Restarted', 'PID': esPID})
+            response.status_code = 201
+            return response
+        elif checkPID(int(esPIDf)) is True:
+            try:
+                subprocess.check_call(["service", "dmon-es", "restart", qESCore.ESCoreHeap])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot restart detached ES Core service with %s and %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart detached ES Core'})
+                response.status_code = 500
+                return response
+            esPID = check_proc(pidESLoc)
+            if not esPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
+                response.status_code = 500
+                return response
+            qESCore.ESCorePID = esPID
+            qESCore.ESCoreStatus = 'Running'
+            response = jsonify({'Status': 'ES Core  Restarted and attached', 'PID': esPID})
+            response.status_code = 201
+            return response
+        else:
+            try:
+                subprocess.check_call(["service", "dmon-es", "start", qESCore.ESCoreHeap])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot start ES Core service with %s and %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot start ES Core'})
+                response.status_code = 500
+                return response
+            esPID = check_proc(pidESLoc)
+            if not esPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
+                response.status_code = 500
+                return response
+            qESCore.ESCorePID = esPID
+            qESCore.ESCoreStatus = 'Running'
+            response = jsonify({'Status': 'ES Core Started', 'PID': esPID})
+            response.status_code = 201
+            return response
+        # response = jsonify({'Status': 'ElasticSearch Core  PID ' + str(esPid)})
+        # response.status_code = 200
+        # return response
+
+
+@dmon.route('/v2/overlord/core/es/<hostFQDN>/start')
+@api.doc(params={'hostFQDN': 'Host FQDN'})
+class ESControllerStartInit(Resource):
+    def post(self, hostFQDN):
+        qESCoreStart = dbESCore.query.filter_by(hostFQDN=hostFQDN).first()
+        pidESLoc = os.path.join(pidDir, 'elasticsearch.pid')
+        if qESCoreStart is None:
+            response = jsonify({'Status': 'Unknown host ' + hostFQDN})
+            response.status_code = 404
+            return response
+
+        if checkPID(qESCoreStart.ESCorePID) is True:
+            proc = psutil.Process(qESCoreStart.ESCorePID)
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                # print >> sys.stderr, 'Process ' + str(qESCoreStart.ESCorePID) + ' is zombie!'
+                app.logger.warning("[%s] : [WARN] Process %s is zombie!",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(qESCoreStart.ESCorePID))
+            else:
+                app.logger.info("[%s] : [INFO] ES Core alredy running with pid %s",
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                                str(qESCoreStart.ESCorePID))
+                response = jsonify({'Status': 'Detected ES Core instance', 'PID': qESCoreStart.ESCorePID})
+                response.status_code = 200
+                return response
+
+        os.environ['ES_HEAP_SIZE'] = qESCoreStart.ESCoreHeap
+
+        # check for running detached es core
+        if os.path.isfile(pidESLoc):
+            esPIDf = check_proc(pidESLoc)
+        else:
+            esPIDf = 0
+
+        if esPIDf != qESCoreStart.ESCorePID:
+            app.logger.warning("[%s] : [WARN] Conflicting PID values found, detached pid -> %s, attached -> %s",
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(esPIDf),
+                               str(qESCoreStart.ESCorePID))
+        elif checkPID(int(esPIDf)) is True:
+            app.logger.info("[%s] : [INFO] ES Core alredy running with detached pid %s",
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                            str(qESCoreStart.ESCorePID))
+            response = jsonify({'Status': 'Detected detached ES Core instance', 'PID': esPIDf})
+            response.status_code = 200
+            return response
+        else:
+            try:
+                subprocess.check_call(["service", "dmon-es", "start", qESCoreStart.ESCoreHeap])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot start ES Core service with %s and %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                 inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot start ES Core'})
+                response.status_code = 500
+                return response
+            esPID = check_proc(pidESLoc)
+            if not esPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
+                response.status_code = 500
+                return response
+            qESCoreStart.ESCorePID = esPID
+            qESCoreStart.ESCoreStatus = 'Running'
+            response = jsonify({'Status': 'ES Core Started', 'PID': esPID})
+            response.status_code = 201
+            return response
+
+
+@dmon.route('/v2/overlord/core/es/<hostFQDN>/stop')
+@api.doc(params={'hostFQDN': 'Host FQDN'})
+class ESControllerStopInit(Resource):
+    def post(self, hostFQDN):
+        qESCoreStop = dbESCore.query.filter_by(hostFQDN=hostFQDN).first()
+        pidESLoc = os.path.join(pidDir, 'elasticsearch.pid')
+        if qESCoreStop is None:
+            response = jsonify({'Status': 'Unknown host ' + hostFQDN})
+            response.status_code = 404
+            return response
+            # check for running detached es core
+        if os.path.isfile(pidESLoc):
+            esPIDf = check_proc(pidESLoc)
+        else:
+            esPIDf = 0
+        if checkPID(qESCoreStop.ESCorePID) is True:
+            # os.kill(qESCoreStop.ESCorePID, signal.SIGTERM)
+            try:
+                subprocess.check_call(["service", "dmon-es", "stop"])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot stop ES Core service with %s and %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                 inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot stop ES Core'})
+                response.status_code = 500
+                return response
+            qESCoreStop.ESCoreStatus = 'Stopped'
+            response = jsonify({'Status': 'Stopped',
+                                'Message': 'Stopped ES instance at ' + str(qESCoreStop.ESCorePID)})
+            app.logger.info('[%s] : [INFO] Stopped ES instance with pid %s ',
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qESCoreStop.ESCorePID)
+            response.status_code = 200
+            return response
+        elif checkPID(esPIDf) is True:
+            try:
+                subprocess.check_call(["service", "dmon-es", "stop"])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot stop detached ES Core service with %s and %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                 inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot stop ES Core'})
+                response.status_code = 500
+                return response
+            qESCoreStop.ESCoreStatus = 'Stopped'
+            response = jsonify({'Status': 'Stopped',
+                                'Message': 'Stopped detached ES instance at ' + str(qESCoreStop.ESCorePID)})
+            app.logger.info('[%s] : [INFO] Stopped ES instance with pid %s ',
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), qESCoreStop.ESCorePID)
+            response.status_code = 200
+            return response
+        else:
+            qESCoreStop.ESCoreStatus = 'unknown'
+            response = jsonify({'Status': 'No ES Instance Found',
+                                'Message': 'No ES instance with PID ' + str(qESCoreStop.ESCorePID)})
+            response.status_code = 404
+            return response
+
+
+@dmon.route('/v/overlord/core/es/status/<intComp>/property/<intProp>')
 @api.doc(params={'intComp': 'ES specific component', 'intProp': 'Component specific property'})
-class ESCOntrollerStatus(Resource):
+class ESControllerStatus(Resource):
     def get(self, intComp, intProp):
 
         compList = ['cluster', 'shards']
@@ -1778,17 +2688,23 @@ class ESCOntrollerStatus(Resource):
         if intComp == 'cluster':
             try:
                 esCoreUrl = 'http://%s:%s/%s/%s' % (qESCore.hostIP, qESCore.nodePort, '_cluster', intProp)
-                print >> sys.stderr, esCoreUrl
+                app.logger.info('[%s] : [INFO] ES Core Url set to %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), esCoreUrl)
+                # print >> sys.stderr, esCoreUrl
                 r = requests.get(esCoreUrl, timeout=2)  # timeout in seconds
                 data = r.json()
             except:
+                app.logger.error('[%s] : [ERROR] Master ES instance unreachable at %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), esCoreUrl)
                 response = jsonify({"Error": "Master ES instances not reachable!"})
                 response.status_code = 500
                 return response
         elif intComp == 'shards' and intProp == 'list':
             try:
                 shardUrl = 'http://%s:%s/%s/%s' % (qESCore.hostIP, qESCore.nodePort, '_cat', intComp)
-                print >> sys.stderr, shardUrl
+                app.logger.info("[%s] : [INFO] Shard URL set to %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), shardUrl)
+                # print >> sys.stderr, shardUrl
                 r = requests.get(shardUrl, timeout=2)
                 data = r.text
             except:
@@ -1800,6 +2716,152 @@ class ESCOntrollerStatus(Resource):
             response.status_code = 400
             return response
         return data
+
+@dmon.route('/v1/overlord/core/es/index/<index>')
+class ESControllerIndex(Resource):
+    def get(self, index):
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            app.logger.error('[%s] : [ERROR] Master ES instance not set at %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Missing es core',
+                                'Message': 'ES core instance not set'})
+            response.status_code = 503
+            return response
+
+        ecc = ESCoreConnector(esEndpoint=qES.hostIP)
+        res = ecc.getIndexSettings(index)
+        if res:
+            response = jsonify(res)
+            response.status_code = 200
+            return response
+        else:
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Cannot get index settings'})
+            response.status_code = 500
+            return response
+
+
+@dmon.route('/v1/overlord/core/es/cluster/health')
+class ESControllerClusterHealth(Resource):
+    def get(self):
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            app.logger.error('[%s] : [ERROR] Master ES instance not set at %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Missing es core',
+                                'Message': 'ES core instance not set'})
+            response.status_code = 503
+            return response
+        ecc = ESCoreConnector(esEndpoint=qES.hostIP)
+        res = ecc.clusterHealth()
+        if res:
+            response = jsonify(res)
+            response.status_code = 200
+            return response
+        else:
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Cannot get cluster health'})
+            response.status_code = 500
+            return response
+
+
+@dmon.route('/v1/overlord/core/es/cluster/settings')
+class ESControllerClusterSettings(Resource):
+    def get(self):
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            app.logger.error('[%s] : [ERROR] Master ES instance not set at %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Missing es core',
+                                'Message': 'ES core instance not set'})
+            response.status_code = 503
+            return response
+        ecc = ESCoreConnector(esEndpoint=qES.hostIP)
+        res = ecc.clusterSettings()
+        if res:
+            response = jsonify(res)
+            response.status_code = 200
+            return response
+        else:
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Cannot get cluster settings'})
+            response.status_code = 500
+            return response
+
+
+@dmon.route('/v1/overlord/core/es/cluster/state')
+class ESCOntrollerClusterState(Resource):
+    def get(self):
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            app.logger.error('[%s] : [ERROR] Master ES instance not set at %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Missing es core',
+                                'Message': 'ES core instance not set'})
+            response.status_code = 503
+            return response
+        ecc = ESCoreConnector(esEndpoint=qES.hostIP)
+        res = ecc.clusterState()
+        if res:
+            response = jsonify(res)
+            response.status_code = 200
+            return response
+        else:
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Cannot get cluster state'})
+            response.status_code = 500
+            return response
+
+
+@dmon.route('/v1/overlord/core/es/node/master/info')
+class ESControllerNodeInfo(Resource):
+    def get(self):
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            app.logger.error('[%s] : [ERROR] Master ES instance not set at %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Missing es core',
+                                'Message': 'ES core instance not set'})
+            response.status_code = 503
+            return response
+        ecc = ESCoreConnector(esEndpoint=qES.hostIP)
+        res = ecc.nodeInfo()
+        if res:
+            response = jsonify(res)
+            response.status_code = 200
+            return response
+        else:
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Cannot get node info'})
+            response.status_code = 500
+            return response
+
+
+@dmon.route('/v1/overlord/core/es/node/master/state')
+class ESControllerNodeState(Resource):
+    def get(self):
+        qES = dbESCore.query.filter_by(MasterNode=1).first()
+        if qES is None:
+            app.logger.error('[%s] : [ERROR] Master ES instance not set at %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Missing es core',
+                                'Message': 'ES core instance not set'})
+            response.status_code = 503
+            return response
+        ecc = ESCoreConnector(esEndpoint=qES.hostIP)
+        res = ecc.nodeState()
+        if res:
+            response = jsonify(res)
+            response.status_code = 200
+            return response
+        else:
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Cannot get node state'})
+            response.status_code = 500
+            return response
+
+# todo add node state and info for each registered node
 
 
 @dmon.route('/v1/overlord/core/es/<hostFQDN>/status')
@@ -1836,7 +2898,9 @@ class ESControllerStart(Resource):
         if checkPID(qESCoreStart.ESCorePID) is True:
             proc = psutil.Process(qESCoreStart.ESCorePID)
             if proc.status() == psutil.STATUS_ZOMBIE:
-                print >> sys.stderr, 'Process ' + str(qESCoreStart.ESCorePID) + ' is zombie!'
+                # print >> sys.stderr, 'Process ' + str(qESCoreStart.ESCorePID) + ' is zombie!'
+                app.logger.warning("[%s] : [WARN] Process %s is zombie!",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(qESCoreStart.ESCorePID))
             else:
                 response = jsonify({'Status': 'ES already Running',
                                     'PID': str(qESCoreStart.ESCorePID)})
@@ -1848,9 +2912,14 @@ class ESControllerStart(Resource):
             esPid = subprocess.Popen('/opt/elasticsearch/bin/elasticsearch',
                                      stdout=subprocess.PIPE).pid  # TODO: Try -p to set pid file location
         except Exception as inst:
-            print >> sys.stderr, 'Error while starting elasticsearch'
-            print >> sys.stderr, type(inst)
-            print >> sys.stderr, inst.args
+            app.logger.error("[%s] : [ERROR] Cannot start ES core service with %s and %s",
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'error', 'Message': 'Cannot start ES Core instance'})
+            response.status_code = 500
+            return response
+            # print >> sys.stderr, 'Error while starting elasticsearch'
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
         qESCoreStart.ESCorePID = esPid
         qESCoreStart.ESCoreStatus = 'Running'
         # ES core pid location
@@ -1977,7 +3046,7 @@ class KKCoreController(Resource):
         templateEnv = jinja2.Environment(loader=templateLoader)
         kbTemp = os.path.join(tmpDir, 'kibana.tmp')  # tmpDir+"/collectd.tmp"
         kbfConf = os.path.join(cfgDir, 'kibana.yml')
-        qKBCore = dbKBCore.query.first()  # TODO: only one instance is supported
+        qKBCore = dbKBCore.query.first()
         if qKBCore is None:
             response = jsonify({"Status": "No KB instance found!"})
             response.status_code = 500
@@ -1989,8 +3058,12 @@ class KKCoreController(Resource):
         try:
             template = templateEnv.get_template(kbTemp)
         # print >>sys.stderr, template
-        except:
-            return "Tempalte file unavailable!"
+        except Exception as inst:
+            app.logger.error('[%s] : [ERROR] Template file unavailable with %s and %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'Error', 'Message': 'Template file unavailable'})
+            response.status_code = 500
+            return response
 
         # Log and PID location for kibana
 
@@ -2015,12 +3088,201 @@ class KKCoreController(Resource):
         try:
             kbPid = subprocess.Popen('/opt/kibana/bin/kibana', stdout=FNULL, stderr=subprocess.STDOUT).pid
         except Exception as inst:
-            print >> sys.stderr, type(inst)
-            print >> sys.stderr, inst.args
+            app.logger.warning('[%s] : [ERROR] Cannot start KB core service with %s and %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
+            response = jsonify({'Status': 'Error', 'Message': 'Cannot start Kibana Core'})
+            response.status_code = 500
+            return response
         qKBCore.KBCorePID = kbPid
         qKBCore.KBCoreStatus = 'Running'
         response = jsonify({'Status': 'Kibana Core  PID ' + str(kbPid)})
         response.status_code = 200
+        return response
+
+
+@dmon.route('/v1/overlord/core/kb/visualizations')
+class KBVisualizations(Resource):
+    def get(self):
+        qESCore = dbESCore.query.filter_by(MasterNode=1).first()
+        if qESCore is None:
+            response = jsonify({'Status': 'ES Core not registered'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] ES Core not registered',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+        ecc = ESCoreConnector(esEndpoint=qESCore.hostIP, index='.kibana')
+        query = {"query": {"match_all": {}}, "size": 500}
+        rsp = ecc.aggQuery('.kibana', queryBody=query)
+        if not rsp:
+            app.logger.error('[%s] : [ERROR] ES Core unreachable',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'ES Core unreachable'})
+            response.status_code = 503
+            return response
+        foundv = []
+        for hits in rsp['hits']['hits']:
+            if hits['_type'] == 'visualization':
+                foundv.append(hits['_source']['title'])
+        response = jsonify({'Visualizations': foundv})
+        response.status_code = 200
+        return response
+
+    def post(self):
+        templateLoader = jinja2.FileSystemLoader(searchpath="/")
+        templateEnv = jinja2.Environment(loader=templateLoader)
+        kbVisTemp = os.path.join(tmpDir, 'visualizations')
+        qNode = dbNodes.query.all()
+        qESCore = dbESCore.query.filter_by(MasterNode=1).first()
+        if qESCore is None:
+            response = jsonify({'Status': 'ES Core not registered'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] ES Core not registered',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+
+        if qNode is None:
+            response = jsonify({'Status': 'No registered nodes'})
+            response.status_code = 404
+            app.logger.warning('[%s] : [WARN] No nodes found',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+        nodeDict = {}
+        for nodes in qNode:
+            listRoles = nodes.nRoles.split(', ')
+            nodeDict[nodes.nodeFQDN] = {'IP': nodes.nodeIP, 'Roles': listRoles}
+
+        ecc = ESCoreConnector(esEndpoint=qESCore.hostIP, index='.kibana')
+        rsp = {}
+        listLoad = []
+        listMemory = []
+        listPackets = []
+        listOctets = []
+        listIfError = []
+        for node in nodeDict.keys():
+            try:
+                template = templateEnv.get_template(os.path.join(kbVisTemp, 'load.tmp'))
+            # print >>sys.stderr, template
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Template file unavailable with %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Load template file unavailable'})
+                response.status_code = 500
+                return response
+            nodeIDName = node.split('.')[-1]
+            lsindex = 'logstash-*'  # TODO create separate viz for more than one index
+            infoKBCore = {"nodeID": node, "nodeIDName": nodeIDName, "index": lsindex}
+            kbConf = template.render(infoKBCore)
+            idStr = "%s-CPU-Load" % nodeIDName
+            res = ecc.pushToIndex('.kibana', 'visualization', kbConf, id=idStr)
+            try:
+                listLoad.append(res["_id"])
+            except Exception as inst:
+                app.logger.warning('[%s] : [ERROR] Failed to create visualization with  %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                listLoad.append({'Failed': node})
+
+            try:
+                template = templateEnv.get_template(os.path.join(kbVisTemp, 'memory.tmp'))
+            # print >>sys.stderr, template
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Template file unavailable with %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Load template file unavailable'})
+                response.status_code = 500
+                return response
+            nodeIDName = node.split('.')[-1]
+            lsindex = 'logstash-*'  # TODO create separate viz for more than one index
+            infoKBCore = {"nodeID": node, "nodeIDName": nodeIDName, "index": lsindex}
+            kbConf = template.render(infoKBCore)
+            idStr = "%s-Memory" % nodeIDName
+            res = ecc.pushToIndex('.kibana', 'visualization', kbConf, id=idStr)
+            try:
+                listMemory.append(res["_id"])
+            except Exception as inst:
+                app.logger.warning('[%s] : [ERROR] Failed to create visualization with  %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                listMemory.append({'Failed': node})
+
+            try:
+                template = templateEnv.get_template(os.path.join(kbVisTemp, 'packets.tmp'))
+            # print >>sys.stderr, template
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Template file unavailable with %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Load template file unavailable'})
+                response.status_code = 500
+                return response
+            nodeIDName = node.split('.')[-1]
+            lsindex = 'logstash-*'  # TODO create separate viz for more than one index
+            infoKBCore = {"nodeID": node, "nodeIDName": nodeIDName, "index": lsindex}
+            kbConf = template.render(infoKBCore)
+            idStr = "%s-Packets" % nodeIDName
+            res = ecc.pushToIndex('.kibana', 'visualization', kbConf, id=idStr)
+            try:
+                listPackets.append(res["_id"])
+            except Exception as inst:
+                app.logger.warning('[%s] : [ERROR] Failed to create visualization with  %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                listPackets.append({'Failed': node})
+
+            try:
+                template = templateEnv.get_template(os.path.join(kbVisTemp, 'octets.tmp'))
+            # print >>sys.stderr, template
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Template file unavailable with %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Load template file unavailable'})
+                response.status_code = 500
+                return response
+            if len(node.split('.')) == 1:
+                nodeIDName = node
+            else:
+                nodeIDName = node.split('.')[-1]
+            lsindex = 'logstash-*'  # TODO create separate viz for more than one index
+            infoKBCore = {"nodeID": node, "nodeIDName": nodeIDName, "index": lsindex}
+            kbConf = template.render(infoKBCore)
+            idStr = "%s-Octets" % nodeIDName
+            res = ecc.pushToIndex('.kibana', 'visualization', kbConf, id=idStr)
+            try:
+                listOctets.append(res["_id"])
+            except Exception as inst:
+                app.logger.warning('[%s] : [ERROR] Failed to create visualization with  %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                listOctets.append({'Failed': node})
+
+            try:
+                template = templateEnv.get_template(os.path.join(kbVisTemp, 'iferror.tmp'))
+            # print >>sys.stderr, template
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Template file unavailable with %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Load template file unavailable'})
+                response.status_code = 500
+                return response
+            nodeIDName = node.split('.')[-1]
+            lsindex = 'logstash-*'  # TODO create separate viz for more than one index
+            infoKBCore = {"nodeID": node, "nodeIDName": nodeIDName, "index": lsindex}
+            kbConf = template.render(infoKBCore)
+            idStr = "%s-IfError" % nodeIDName
+            res = ecc.pushToIndex('.kibana', 'visualization', kbConf, id=idStr)
+            try:
+                listIfError.append(res["_id"])
+            except Exception as inst:
+                app.logger.warning('[%s] : [ERROR] Failed to create visualization with  %s and %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+                listIfError.append({'Failed': node})
+
+        rsp['Load'] = listLoad
+        rsp['Memory'] = listMemory
+        rsp['Packets'] = listPackets
+        rsp['Octets'] = listOctets
+        rsp['IfError'] = listIfError
+        app.logger.info('[%s] : [INFO] Created visualizations %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(rsp))
+        response = jsonify(rsp)
+        response.status_code = 201
         return response
 
 
@@ -2193,11 +3455,25 @@ class LSCoreController(Resource):
             if checkPID(hosts[15]):
                 confDict['Status'] = hosts[8]
                 confDict['PID'] = hosts[15]
+                app.logger.info('[%s] : LS Core service  found at PID %s',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                                   str(hosts[15]))
             else:
-                app.logger.warning('[%s] : LS Core service not found at PID %s, setting to failed',
-                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(hosts[7]))
-                confDict['Status'] = 'failed'  #TODO: Document failed message if PID is not assigned to an LS Instance
-                confDict['PID'] = 0
+                pidLSLoc = os.path.join(pidDir, 'logstash.pid')
+                if os.path.isfile(pidLSLoc):
+                    esPIDf = check_proc(pidLSLoc)
+                    if checkPID(esPIDf):
+                        confDict['Status'] = 'detached'  #TODO: Document failed message if PID is not assigned to an LS Instance
+                        confDict['PID'] = esPIDf
+                        app.logger.warning('[%s] : Detached LS Core service  found at PID %s, setting to detached',
+                                           datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                                           esPIDf)
+                    else:
+                        confDict['Status'] = 'unknown'  # TODO: Document failed message if PID is not assigned to an LS Instance
+                        confDict['PID'] = 0
+                        app.logger.warning('[%s] : LS Core service , setting to unknonw',
+                                           datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+
             confDict['LSCoreHeap'] = hosts[14]
             resList.append(confDict)
         response = jsonify({'LS Instances': resList})
@@ -2243,8 +3519,6 @@ class LSCoreController(Resource):
             response = jsonify({"Status": "LS Tempalte file unavailable!"})
             response.status_code = 404
             return response
-
-
 
         if qSCore.sslCert == 'default':
             certLoc = os.path.join(credDir, 'logstash-forwarder.crt')
@@ -2305,13 +3579,24 @@ class LSCoreController(Resource):
         app.logger.info('[%s] : [INFO] Yarn History Status -> %s',
                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), yarnStatus)
 
+        # appname tag is set the same for spark and yarn
+        qActiveApp = dbApp.query.filter_by(jobID='ACTIVE').first()
+        if qActiveApp is None:
+            app.logger.warning('[%s] : [WARN] No active applications registered tag set to default',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            appName = 'default'
+        else:
+            appName = qActiveApp.jobID
+            app.logger.info('[%s] : [INFO] Tag for application %s set',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), appName)
+
         infoSCore = {"sslcert": certLoc, "sslkey": keyLoc, "udpPort": qSCore.udpPort,
                      "ESCluster": qSCore.outESclusterName, "EShostIP": qESCore.hostIP,
                      "EShostPort": qESCore.nodePort, "StormRestIP": StormRestIP,
                      "StormRestPort": qSCore.LSCoreStormPort, "StormTopologyID": qSCore.LSCoreStormTopology,
                      'storm_interval': stormInterval, 'roles': uniqueRolesList, 'myIndex': qSCore.diceIndex,
                      'nSpout': spouts, 'nBolt': bolts, 'yarnHEnd': yarnHEnd, 'yarnHPort': yarnHPort,
-                     'yarnHPoll': yarnHPoll}
+                     'yarnHPoll': yarnHPoll, 'appName': appName}
         sConf = template.render(infoSCore)
         qSCore.conf = sConf
         # print >>sys.stderr, esConf
@@ -2360,6 +3645,223 @@ class LSCoreController(Resource):
         return response
 
 
+@dmon.route('/v2/overlord/core/ls')
+class LSCoreControllerInit(Resource):
+    def post(self):
+        templateLoader = jinja2.FileSystemLoader(searchpath="/")
+        templateEnv = jinja2.Environment(loader=templateLoader)
+        lsTemp = os.path.join(tmpDir, 'logstash.tmp')  # tmpDir+"/collectd.tmp"
+        lsfCore = os.path.join(cfgDir, 'logstash.conf')
+        # qSCore = db.session.query(dbSCore.hostFQDN).first()
+        qSCore = dbSCore.query.first()  # TODO: currently only one LS instance supported
+        # return qSCore
+        if qSCore is None:
+            response = jsonify({"Status": "No LS instances registered"})
+            response.status_code = 500
+            app.logger.warning('[%s] : [WARN] No LS instance registred',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+        qESCore = dbESCore.query.filter_by(MasterNode=1).first()  # TODO: only works with the master node
+        if qESCore is None:
+            response = jsonify({"Status": "No ES instances registered"})
+            response.status_code = 500
+            app.logger.warning('[%s] : [WARN] No ES instance registred',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            return response
+
+        if checkPID(qSCore.LSCorePID) is True:
+            subprocess.call(['kill', '-9', str(qSCore.LSCorePID)])
+            app.logger.info('[%s] : [INFO] Killed LS Instance at %s',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                            str(qSCore.LSCorePID))
+
+        try:
+            template = templateEnv.get_template(lsTemp)
+        # print >>sys.stderr, template
+        except Exception as inst:
+            app.logger.error('[%s] : [ERROR] LS tempalte file unavailable with %s and %s',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
+            response = jsonify({"Status": "LS Tempalte file unavailable!"})
+            response.status_code = 404
+            return response
+
+        if qSCore.sslCert == 'default':
+            certLoc = os.path.join(credDir, 'logstash-forwarder.crt')
+        else:
+            certLoc = os.path.join(credDir, qSCore.sslCert + '.crt')
+
+        if qSCore.sslKey == 'default':
+            keyLoc = os.path.join(credDir, 'logstash-forwarder.key')
+        else:
+            keyLoc = os.path.join(credDir, qSCore.sslKey + '.key')
+
+        if qSCore.LSCoreStormEndpoint == 'None':
+            StormRestIP = 'None'
+        else:
+            StormRestIP = qSCore.LSCoreStormEndpoint
+        qNodeRoles = db.session.query(dbNodes.nRoles).all()
+        if qNodeRoles is None:
+            uniqueRolesList = ['unknown']
+        else:
+            uList = []
+            for r in qNodeRoles:
+                uList.append(r[0].split(', '))
+            uniqueRoles = set(x for l in uList for x in l) #TODO find better solution for finding unique roles
+            uniqueRolesList = list(uniqueRoles)
+
+        qMetInt =dbMetPer.query.first()
+        if qMetInt is None:
+            stormInterval = '60'
+        else:
+            stormInterval = qMetInt.stormMet
+        if 'storm' in uniqueRolesList:
+            stormStatus = 'Storm registered'
+            bolts, spouts = checkStormSpoutsBolts(StormRestIP, qSCore.LSCoreStormPort, qSCore.LSCoreStormTopology)
+            if spouts == 0 or bolts == 0:
+                uniqueRolesList.remove('storm')
+                app.logger.warning('[%s] : [WARN] Storm topology spouts and botls not found, ignoring Storm',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                stormStatus = 'Storm ignored'
+        else:
+            stormStatus = 'Not registered'
+            spouts = 0
+            bolts = 0
+        app.logger.info('[%s] : [INFO] Storm Status -> %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), stormStatus)
+
+        qBDService = dbBDService.query.first()
+        if qBDService is None:
+            yarnHEnd = 'None'
+            yarnHPort = '19888'
+            yarnHPoll = '30'
+            yarnStatus = 'Not Registered'
+        else:
+            yarnHEnd = qBDService.yarnHEnd
+            yarnHPort = qBDService.yarnHPort
+            yarnHPoll = qBDService.yarnHPoll
+            yarnStatus = 'Registered'
+
+        app.logger.info('[%s] : [INFO] Yarn History Status -> %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), yarnStatus)
+
+        # appname tag is set the same for spark and yarn
+        qActiveApp = dbApp.query.filter_by(jobID='ACTIVE').first()
+        if qActiveApp is None:
+            app.logger.warning('[%s] : [WARN] No active applications registered tag set to default',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            appName = 'default'
+        else:
+            appName = qActiveApp.jobID
+            app.logger.info('[%s] : [INFO] Tag for application %s set',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), appName)
+
+        infoSCore = {"sslcert": certLoc, "sslkey": keyLoc, "udpPort": qSCore.udpPort,
+                     "ESCluster": qSCore.outESclusterName, "EShostIP": qESCore.hostIP,
+                     "EShostPort": qESCore.nodePort, "StormRestIP": StormRestIP,
+                     "StormRestPort": qSCore.LSCoreStormPort, "StormTopologyID": qSCore.LSCoreStormTopology,
+                     'storm_interval': stormInterval, 'roles': uniqueRolesList, 'myIndex': qSCore.diceIndex,
+                     'nSpout': spouts, 'nBolt': bolts, 'yarnHEnd': yarnHEnd, 'yarnHPort': yarnHPort,
+                     'yarnHPoll': yarnHPoll, 'appName': appName}
+        sConf = template.render(infoSCore)
+        qSCore.conf = sConf
+        # print >>sys.stderr, esConf
+        db.session.commit()
+
+        lsCoreConf = open(lsfCore, "w+")
+        lsCoreConf.write(sConf)
+        lsCoreConf.close()
+
+        os.environ['LS_HEAP_SIZE'] = os.getenv('LS_HEAP_SIZE',
+                                               qSCore.LSCoreHeap)  # TODO: if heap size set in env then use it if not use db one
+        app.logger.info('[%s] : [INFO] LS Heap size set to %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                        str(os.environ['LS_HEAP_SIZE']))
+
+        lsLogfile = os.path.join(logDir, 'logstash.log')
+        lsPIDFileLoc = os.path.join(pidDir, 'logstash.pid')
+
+        if os.path.isfile(lsPIDFileLoc):
+            lsPidf = check_proc(lsPIDFileLoc)
+        else:
+            lsPidf = 0
+
+        if lsPidf != qSCore.LSCorePID:
+            app.logger.warning("[%s] : [WARN] Conflicting PID values found, detached pid -> %s, attached -> %s",
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(lsPidf),
+                               str(qSCore.LSCorePID))
+
+        if checkPID(qSCore.LSCorePID) is True:
+            try:
+                subprocess.check_call(["service", "dmon-ls", "restart", qSCore.LSCoreHeap, qSCore.LSCoreWorkers])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot restart LS Core service with %s and %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                 inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart LS Core'})
+                response.status_code = 500
+                return response
+            lsPID = check_proc(lsPIDFileLoc)
+            if not lsPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for ls core",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read lscore pid file'})
+                response.status_code = 500
+                return response
+            qSCore.ESCorePID = lsPID
+            qSCore.ESCoreStatus = 'Running'
+            response = jsonify({'Status': 'LS Core Restarted', 'PID': lsPID})
+            response.status_code = 201
+            return response
+        elif checkPID(int(lsPidf)) is True:
+            try:
+                subprocess.check_call(["service", "dmon-ls", "restart", qSCore.LSCoreHeap, qSCore.LSCoreWorkers])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot restart detached LS Core service with %s and %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                 inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart detached LS Core'})
+                response.status_code = 500
+                return response
+            lsPID = check_proc(lsPIDFileLoc)
+            if not lsPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for ls core",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read ls core pid file'})
+                response.status_code = 500
+                return response
+            qSCore.LSCorePID = lsPID
+            qSCore.LSCoreStatus = 'Running'
+            response = jsonify({'Status': 'LS Core  Restarted and attached', 'PID': lsPID})
+            response.status_code = 201
+            return response
+        else:
+            try:
+                subprocess.check_call(["service", "dmon-ls", "start", qSCore.LSCoreHeap, qSCore.LSCoreWorkers])
+            except Exception as inst:
+                app.logger.error("[%s] : [ERROR] Cannot start LS Core service with %s and %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                 inst.args)
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot start LS Core'})
+                response.status_code = 500
+                return response
+            lsPID = check_proc(lsPIDFileLoc)
+            if not lsPID:
+                app.logger.error("[%s] : [ERROR] Can't read pidfile for ls core",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
+                response.status_code = 500
+                return response
+            qSCore.LSCorePID = lsPID
+            qSCore.LSCoreStatus = 'Running'
+            response = jsonify({'Status': 'LS Core Started', 'PID': lsPID, 'Storm': stormStatus, 'YarnHistory': yarnStatus})
+            response.status_code = 201
+            app.logger.info("[%s] : [INFO] LS Core started with PID %s, Storm %s and YanrHistory %s",
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), lsPID, stormStatus, yarnStatus)
+            return response
+
+
 @dmon.route('/v1/overlord/core/ls/<hostFQDN>/status')
 @api.doc(params={'hostFQDN': 'Host FQDN'})
 class LSCoreControllerStatus(Resource):
@@ -2396,7 +3898,10 @@ class LSCoreControllerStart(Resource):
         if checkPID(qLSCoreStart.LSCorePID) is True:
             proc = psutil.Process(qLSCoreStart.LSCorePID)
             if proc.status() == psutil.STATUS_ZOMBIE:
-                print >> sys.stderr, 'Process ' + str(qLSCoreStart.LSCorePID) + ' is zombie!'
+                # print >> sys.stderr, 'Process ' + str(qLSCoreStart.LSCorePID) + ' is zombie!'
+                app.logger.warning('[%s] : [WARN] Process %s is a zombie!',
+                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                                   str(qLSCoreStart.LSCorePID))
             else:
                 response = jsonify({'Status': 'LS already Running',
                                     'PID': qLSCoreStart.LSCorePID})
@@ -2408,9 +3913,14 @@ class LSCoreControllerStart(Resource):
             lsPid = subprocess.Popen('/opt/logstash/bin/logstash agent  -f ' + lsfCore + ' -l ' + lsLogfile + ' -w 4',
                                      shell=True).pid
         except Exception as inst:
-            print >> sys.stderr, 'Error while starting logstash'
-            print >> sys.stderr, type(inst)
-            print >> sys.stderr, inst.args
+            app.logger.error('[%s] : [ERROR] Cannot start ls core instance with %s and %s!',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'Error', 'Message': 'Cannot start LS Core service'})
+            response.status_code = 500
+            return response
+            # print >> sys.stderr, 'Error while starting logstash'
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
         qLSCoreStart.LSCorePID = lsPid
         qLSCoreStart.LSCoreStatus = 'Running'
         # LS core pid location
@@ -2467,7 +3977,9 @@ class LSCredControl(Resource):
             return response
         for nl in credAll:
             credDict = {}
-            print >> sys.stderr, nl[0]
+            # print >> sys.stderr, nl[0]
+            app.logger.info('[%s] : [INFO] Credentials host %s!',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), nl[0])
             credDict['LS Host'] = nl[0]
             credDict['Certificate'] = nl[2]
             credDict['Key'] = nl[3]
@@ -2647,7 +4159,9 @@ class AuxDeploy(Resource):
         for n in qNodes:
             credentials['User'] = n[4]  # TODO need a more elegant solution, currently it is rewriten every iteration
             credentials['Pass'] = n[5]
-            print >> sys.stderr, credentials
+            # print >> sys.stderr, credentials
+            app.logger.info('[%s] : [INFO] Credentials used %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), credentials)
             rp = {}
             if n[1] == False:  # check if node is monitored
                 rp['Node'] = n[0]
@@ -2663,11 +4177,15 @@ class AuxDeploy(Resource):
         allNodes = []
         for res in result:
             if res['Collectd'] == 'None':
-                print >> sys.stderr, 'No collectd!'
+                # print >> sys.stderr, 'No collectd!'
+                app.logger.info('[%s] : [INFO] No collectd',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
                 collectdList.append(res['IP'])
             if res['LSF'] == 'None':
                 LSFList.append(res['IP'])
-                print >> sys.stderr, 'No LSF!'
+                app.logger.info('[%s] : [INFO] No LSF',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                # print >> sys.stderr, 'No LSF!'
             allNodes.append(res['IP'])
 
         args = dmonAuxAll.parse_args()
@@ -2688,10 +4206,12 @@ class AuxDeploy(Resource):
             response.status_code = 200
             return response
 
-        print >> sys.stderr, collectdList
-        print >> sys.stderr, LSFList
-        print >> sys.stderr, credentials['User']
-        print >> sys.stderr, confDir
+        app.logger.info('[%s] : [INFO] Collectd list -> %s, LSFList -> %s, credentials -> %s, Conf dir -> %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), collectdList, LSFList, credentials['User'], confDir)
+        # print >> sys.stderr, collectdList
+        # print >> sys.stderr, LSFList
+        # print >> sys.stderr, credentials['User']
+        # print >> sys.stderr, confDir
 
         qSCore = dbSCore.query.first()  # TODO Change for distributed deployment
         if qSCore is None:
@@ -2703,7 +4223,11 @@ class AuxDeploy(Resource):
             lsfTemplate = templateEnv.get_template(lsfTemp)
         # print >>sys.stderr, template
         except:
-            return "Tempalte file unavailable!"
+            app.logger.error('[%s] : [ERROR] Template file unavailable',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Error', 'Message': 'Template file unavailable'})
+            response.status_code = 500
+            return response
 
         # {{ESCoreIP}}:{{LSLumberPort}}
         infolsfAux = {"ESCoreIP": qSCore.hostIP, "LSLumberPort": qSCore.inLumberPort}
@@ -2717,7 +4241,12 @@ class AuxDeploy(Resource):
         try:
             collectdTemplate = templateEnv.get_template(collectdTemp)
         except:
-            return "Template file unavailable!"
+            app.logger.error('[%s] : [ERROR] Template file unavailable',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'Error', 'Message': 'Template file unavailable'})
+            response.status_code = 500
+            return response
+            # return "Template file unavailable!"
 
         infocollectdAux = {"logstash_server_ip": qSCore.hostIP, "logstash_server_port": qSCore.udpPort}
         collectdConf = collectdTemplate.render(infocollectdAux)
@@ -2729,8 +4258,10 @@ class AuxDeploy(Resource):
         try:
             installCollectd(collectdList, credentials['User'], credentials['Pass'], confDir=cfgDir)
         except Exception as inst:  # TODO if exceptions is detected check to see if collectd started if not return fail if yes return warning
-            print >> sys.stderr, type(inst)
-            print >> sys.stderr, inst.args
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
+            app.logger.error('[%s] : [ERROR] Cannot install collectd with %s and  %s',
+                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
             response = jsonify({'Status': 'Error Installing collectd!'})
             response.status_code = 500
             return response
@@ -2739,9 +4270,11 @@ class AuxDeploy(Resource):
             installLogstashForwarder(LSFList, userName=credentials['User'], uPassword=credentials['Pass'],
                                      confDir=cfgDir)
         except Exception as inst:
-            print >> sys.stderr, type(inst)
-            print >> sys.stderr, inst.args
-            response = jsonify({'Status': 'Error Installig LSF!'})
+            # print >> sys.stderr, type(inst)
+            # print >> sys.stderr, inst.args
+            app.logger.error('[%s] : [ERROR] Cannot install lsf with %s and  %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'Error Installing LSF!'})
             response.status_code = 500
             return response
 
@@ -2787,7 +4320,7 @@ class AuxAgentDeploy(Resource):
                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(an))
         return response
 
-    def post(self):  # TODO: only works if all nodes have the same authentication
+    def post(self):  # todo verify
         qN = db.session.query(dbNodes.nodeIP, dbNodes.nStatus, dbNodes.nUser, dbNodes.nPass).all()
         if not qN:
             response = jsonify({'Status': 'No nodes registered'})
@@ -2833,11 +4366,13 @@ class AuxAgentDeploy(Resource):
         return response
 
 
-@dmon.route('/v2/overlord/agent/start')
+@dmon.route('/v2/overlord/agent/start') #todo verify
 class AuxAgentStart(Resource):
     def post(self):
         qNodeStatus = dbNodes.query.filter_by(nStatus=1).all()
-        print >> sys.stderr, qNodeStatus
+        # print >> sys.stderr, qNodeStatus
+        app.logger.info('[%s] : [INFO] Node Status %s',
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(qNodeStatus))
         if not qNodeStatus:
             response = jsonify({'Status': 'Agent Exception',
                                 'Message': 'No agents are registered'})
@@ -2880,7 +4415,7 @@ class AuxAgentStart(Resource):
         return response
 
 
-@dmon.route('/v2/overlord/agent/stop')
+@dmon.route('/v2/overlord/agent/stop') #todo verify
 class AuxAgentStop(Resource):
     def post(self):
         qNodeStatus = dbNodes.query.filter_by(nMonitored=1).all()
@@ -2994,12 +4529,16 @@ class AuxDeployThread(Resource):
                 failedNodes.append({'NodeIP': str(nodeIP.hostname),
                                     'Code': n['StatusCode']})
             # print >> sys.stderr, str(n['Data']['Components'])
-            print >> sys.stderr, str(n)
+            # print >> sys.stderr, str(n)
+            app.logger.debug('[%s] : [DEBUG] Node response -> %s',
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(n))
             try:
                 NodeDict[nodeIP.hostname] = n['Data']['Components']
             except Exception as inst:
-                print >> sys.stderr, type(inst)
-                print >> sys.stderr, inst.args
+                # print >> sys.stderr, type(inst)
+                # print >> sys.stderr, inst.args
+                app.logger.error('[%s] : [ERROR] Keys missing, exception %s with %s',
+                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
                 NodeDict[nodeIP.hostname] = "Failed"
         response = jsonify({'Status': 'Installed Aux ',
                             'Message': NodeDict,
@@ -3098,8 +4637,11 @@ class AuxDeploySelective(Resource):
                 try:
                     serviceCtrl(node, qAux.nUser, qAux.nPass, 'collectd', 'restart')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot start collectd with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error restarting Collectd on ' + nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3110,9 +4652,12 @@ class AuxDeploySelective(Resource):
                 try:
                     installCollectd(node, qAux.nUser, qAux.nPass, confDir=cfgDir)
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
-                    response = jsonify({'Status': 'Error Installig Collectd on ' + qAux.nodeFQDN + '!'})
+                    app.logger.error('[%s] : [ERROR] Cannot install collectd with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
+                    response = jsonify({'Status': 'Error Installing Collectd on ' + qAux.nodeFQDN + '!'})
                     response.status_code = 500
                     return response
                 # status[auxComp] = 'Running'
@@ -3133,8 +4678,11 @@ class AuxDeploySelective(Resource):
                 try:
                     serviceCtrl(node, qAux.nUser, qAux.nPass, 'logstash-forwarder', 'restart')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot start lsf with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error restarting LSF on ' + nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3145,9 +4693,12 @@ class AuxDeploySelective(Resource):
                 try:
                     installLogstashForwarder(node, qAux.nUser, qAux.nPass, confDir=cfgDir)
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
-                    response = jsonify({'Status': 'Error Installig LSF on ' + qAux.nodeFQDN + '!'})
+                    app.logger.error('[%s] : [ERROR] Cannot install lsf with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
+                    response = jsonify({'Status': 'Error Installing LSF on ' + qAux.nodeFQDN + '!'})
                     response.status_code = 500
                     return response
                 # status[auxComp] = 'Running'
@@ -3229,7 +4780,7 @@ class AuxConfigSelective(Resource):
                 return response
         return send_file(Cfgfile, mimetype='text/plain', as_attachment=True)
 
-    def put(self, auxComp):
+    def put(self, auxComp): #todo remove or leave
         return "Sets configuration of aux components use parameters (args) -unsafe"
 
 
@@ -3258,10 +4809,13 @@ class AuxStartAll(Resource):
                 try:
                     serviceCtrl(node, i.nUser, i.nPass, 'collectd', 'start')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot start collectd with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                 # response = jsonify({'Status':'Error Starting collectd on '+ i.nodeFQDN +'!'})
-                # response.status_code = 500
+                # response.status_code = 500 # todo check if return is required for collectd
                 # return response
 
                 CollectdNodes = {}
@@ -3287,11 +4841,14 @@ class AuxStartAll(Resource):
                 try:
                     serviceCtrl(node, i.nUser, i.nPass, 'logstash-forwarder', 'start')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
-                    response = jsonify({'Status': 'Error Starting LSF on ' + i.nodeFQDN + '!'})
-                    response.status_code = 500
-                    return response
+                    app.logger.error('[%s] : [ERROR] Cannot start lsf with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
+                    # response = jsonify({'Status': 'Error Starting LSF on ' + i.nodeFQDN + '!'})
+                    # response.status_code = 500 # todo check if return is required for collectd
+                    # return response
 
                 LsfNodes = {}
                 LsfNodes['Node'] = i.nodeFQDN
@@ -3328,11 +4885,15 @@ class AuxStopAll(Resource):
                 try:
                     serviceCtrl(node, i.nUser, i.nPass, 'collectd', 'stop')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot stop collectd with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error Stopping collectd on ' + i.nodeFQDN + '!'})
                     response.status_code = 500
                     return response
+
                 CollectdNodes = {}
                 CollectdNodes['Node'] = i.nodeFQDN
                 CollectdNodes['IP'] = i.nodeIP
@@ -3356,8 +4917,11 @@ class AuxStopAll(Resource):
                 try:
                     serviceCtrl(node, i.nUser, i.nPass, 'logstash-forwarder', 'stop')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot stop lsf with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error Stopping LSF on ' + i.nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3395,8 +4959,11 @@ class AuxStartSelective(Resource):
                 try:
                     serviceCtrl(node, qAux.nUser, qAux.nPass, 'collectd', 'restart')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot restart collectd with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error restarting collectd on ' + nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3413,8 +4980,11 @@ class AuxStartSelective(Resource):
                 try:
                     serviceCtrl(node, qAux.nUser, qAux.nPass, 'logstash-forwarder', 'restart')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot restart lsf with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error restarting LSF on ' + nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3450,8 +5020,11 @@ class AuxStopSelective(Resource):
                 try:
                     serviceCtrl(node, qAux.nUser, qAux.nPass, 'collectd', 'stop')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot stop collectd with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error stopping collectd on ' + nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3469,8 +5042,11 @@ class AuxStopSelective(Resource):
                 try:
                     serviceCtrl(node, qAux.nUser, qAux.nPass, 'logstash-forwarder', 'stop')
                 except Exception as inst:
-                    print >> sys.stderr, type(inst)
-                    print >> sys.stderr, inst.args
+                    app.logger.error('[%s] : [ERROR] Cannot stop lsf with %s and  %s',
+                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                                     inst.args)
+                    # print >> sys.stderr, type(inst)
+                    # print >> sys.stderr, inst.args
                     response = jsonify({'Status': 'Error stopping LSF on ' + nodeFQDN + '!'})
                     response.status_code = 500
                     return response
@@ -3709,7 +5285,7 @@ class AuxStopAllThreaded(Resource):
         return response
 
 
-@dmon.route('/v2/overlord/aux/<auxComp>/configure')
+@dmon.route('/v2/overlord/aux/<auxComp>/configure') #this is the correct one for configuring components
 class AuxConfigureCompTreaded(Resource):
     def post(self, auxComp):
         auxList = ['collectd', 'lsf', 'jmx'] #TODO: add all, will need some concurency on dmon-agent part
@@ -3719,19 +5295,29 @@ class AuxConfigureCompTreaded(Resource):
             app.logger.warning('[%s] : [WARNING] Aux Components %s not supported',
                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), auxComp)
             return response
-        qNodes = db.session.query(dbNodes.nodeIP, dbNodes.nMonitored).all()
+        qNodes = db.session.query(dbNodes.nodeIP, dbNodes.nMonitored, dbNodes.nRoles).all()
         nList = []
+        nRoles = []
         for n in qNodes:
             if not n[1]:
                 break
             nList.append(n[0])
+            nRoles.append(n[2])
         if not nList:
             response = jsonify({'Status': 'No monitored nodes found'})
             response.status_code = 404
-            app.logger.warning('[%s] : [WARNING] No monitored nodes found',
+            app.logger.warning('[%s] : [WARN] No monitored nodes found',
                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), auxComp)
             return response
 
+        uList = []
+        for r in nRoles:
+            uList.append(r.split(', '))
+        uniqueRoles = set(x for l in uList for x in l)
+        uniqueRolesList = list(uniqueRoles)
+        # todo ad support on a per node bases for roles not global unique list
+        app.logger.info('[%s] : [INFO] Unique roles %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(uniqueRolesList))
         agentr = AgentResourceConstructor(nList, '5222')
         qMetPer = dbMetPer.query.first()
         if auxComp == 'collectd':
@@ -3742,9 +5328,34 @@ class AuxConfigureCompTreaded(Resource):
                 nIP = urlparse(n).hostname
                 qNodeSpec = dbNodes.query.filter_by(nodeIP=nIP).first() #TODO: unify db foreign keys in tables
                 qLSSpec = dbSCore.query.filter_by(hostIP=qNodeSpec.nLogstashInstance).first()
+                if qLSSpec is None:
+                    response = jsonify({'Status': 'No logstash instance found'})
+                    response.status_code = 404
+                    app.logger.warning('[%s] : [WARNING] No Logstash instance found with IP %s',
+                                       datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(qNodeSpec.nLogstashInstance))
+                    return response
                 payload['Interval'] = qMetPer.sysMet
                 payload['LogstashIP'] = qNodeSpec.nLogstashInstance
                 payload['UDPPort'] = str(qLSSpec.udpPort)
+                if 'cassandra' in uniqueRolesList:
+                    payload['Cassandra'] = 1
+                else:
+                    payload['Cassandra'] = 0
+                if 'mongodb' in uniqueRolesList:
+                    qBDS = dbBDService.query.first()
+                    if qBDS is None:
+                        app.logger.warning('[%s] : [WARNING] MongoDB role found but no settings detected',
+                                           datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                        pass
+                    else:
+                        payload['MongoDB'] = 1
+                        payload['MongoHost'] = qBDS.mongoHost
+                        payload['MongoDBPort'] = qBDS.mongoPort
+                        payload['MongoDBUser'] = qBDS.mongoUser
+                        payload['MongoDBPasswd'] = qBDS.mongoPswd
+                        payload['MongoDBs'] = qBDS.mongoDBs
+                        app.logger.info('[%s] : [INFO] MongoDB role found added settings to queue',
+                                           datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
                 resFin[n] = payload
 
         if auxComp == 'lsf':
@@ -3760,7 +5371,9 @@ class AuxConfigureCompTreaded(Resource):
                 resFin[n] = payload
 
         if auxComp == 'jmx':
-            return "Not available in this version!"
+            response = jsonify({'Status': 'Deprecated', 'Message': 'Use GenericJMX'})
+            response.status_code = 200
+            return response
 
 
         # if auxComp == 'all':
@@ -3897,6 +5510,13 @@ class DMONReset(Resource):
         return "Done"
 
 
+@dmon.route('/vx/test')
+class WTF(Resource):
+    def get(self):
+        qESCore = dbESCore.query.filter_by(MasterNode=1).first()
+
+        return qESCore.nodePort
+
 
 """
 Custom errot Handling
@@ -3953,6 +5573,10 @@ if __name__ == '__main__':
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.DEBUG)
     log.addHandler(handler)
+    #DB Initialization
+    # app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(baseDir, 'dmon.db')
+    # app.config['SQLALCHEMY_COMMIT_ON_TEARDOWN'] = True
+    # db.create_all()
     if len(sys.argv) == 1:
         app.run(port=5001, debug=True, threaded=True)
     else:

@@ -30,6 +30,7 @@ from app import *
 from dbModel import *
 from greenletThreads import *
 from urlparse import urlparse
+import pandas as pd
 
 
 def portScan(addrs, ports):
@@ -127,6 +128,7 @@ def checkUnique(nodeList):
 
 class AgentResourceConstructor():
     uriRoot = '/agent/v1'
+    uriRoot2 = '/agent/v2'
     chck = '/check'
     clctd = '/collectd'
     logsf = '/lsf'
@@ -137,12 +139,11 @@ class AgentResourceConstructor():
     noder = '/node'
     startr = '/start'
     stopr = '/stop'
+    slogs = '/bdp/storm/logs'
 
     def __init__(self, IPList, Port):
         self.IPList = IPList
         self.Port = Port
-
-
 
     def check(self):
         resourceList = []
@@ -240,6 +241,13 @@ class AgentResourceConstructor():
             confList.append(resource)
         return confList
 
+    def stormLogs(self):
+        logList = []
+        for ip in self.IPList:
+            resource = 'http://%s:%s%s%s' %(ip, self.Port, AgentResourceConstructor.uriRoot2, AgentResourceConstructor.slogs)
+            logList.append(resource)
+        return logList
+
 
 def dbBackup(db, source, destination, version=1):
     '''
@@ -266,10 +274,12 @@ def detectStormTopology(ip, port=8080):
     try:
         r = requests.get(url, timeout=2)
     except requests.exceptions.Timeout:
-        print "Connection timedout"
+        app.logger.error('[%s] : [ERROR] Cannot connect to %s timedout',
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(url))
         raise
     except requests.exceptions.ConnectionError:
-        print "Connection error"
+        app.logger.error('[%s] : [ERROR] Cannot connect to %s error',
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(url))
         raise
 
     topologySummary = r.json()
@@ -306,10 +316,12 @@ def checkStormSpoutsBolts(ip, port, topology):
     try:
         r = requests.get(url, timeout=2)
     except requests.exceptions.Timeout:
-        print "Connection timedout"
+        app.logger.error('[%s] : [ERROR] Cannot connect to %s timedout',
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(url))
         return 0, 0
     except requests.exceptions.ConnectionError:
-        print "Connection error"
+        app.logger.error('[%s] : [ERROR] Cannot connect to %s error',
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(url))
         return 0, 0
     if r.status_code != 200:
         return 0, 0
@@ -655,29 +667,90 @@ def checkCoreState(esPidf, lsPidf, kbPidf):  #TODO: works only for local deploym
                                     datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
                     qKBCore.KBCorePID = 0
 
-# test = AgentResourceConstructor(['192.12.12.12'], '5000')
-#
-# t = test.check()
-# c = test.collectd()
-# l = test.lsf()
-# j = test.jmx()
-# d = test.deploy()
-# n = test.node()
-# s = test.start()
-# st = test.stop()
-# ss = test.startSelective('lsf')
-# sts = test.stopSelective('collectd')
-# log = test.logs('lsf')
-# conf = test.conf('collectd')
-# print t
-# print c
-# print l
-# print j
-# print d
-# print n
-# print s
-# print st
-# print ss
-# print sts
-# print log
-# print conf
+
+def str2Bool(st):
+    '''
+    :param st: -> string to test
+    :return: -> if true then returns 1 else 0
+    '''
+    if type(st) is bool:
+        return st
+    if st in ['True', 'true', '1']:
+        return 1
+    elif st in ['False', 'false', '0']:
+        return 0
+    else:
+        return 0
+
+
+def csvheaders2colNames(csvfile, adname):
+    '''
+    :param csvfile: -> input csv or dataframe
+    :param adname: -> string to add to column names
+    :param df: -> if set to false csvfile is used if not df is used
+    :return:
+    '''
+    colNames = {}
+    if isinstance(csvfile, pd.DataFrame):
+        for e in csvfile.columns.values:
+            if e == 'key':
+                pass
+            else:
+                colNames[e] = '%s_%s' % (e, adname)
+    else:
+        return 0
+    return colNames
+
+
+def check_proc(pidfile, wait=5):
+    '''
+    :param pidfile: -> location of pid
+    :return: -> return pid
+    '''
+    tick = 0
+    time.sleep(wait)
+    while not os.path.exists(pidfile):
+        time.sleep(1)
+        tick += 1
+        if tick > wait:
+            return 0
+    stats_pid = open(pidfile)
+    pid = int(stats_pid.read())
+    return pid
+
+
+
+
+
+if __name__ == '__main__':
+#     db.create_all()
+#     test = DetectBDService()
+#     what = test.detectYarnHS()
+#     print what
+    test = AgentResourceConstructor(['85.120.206.45', '85.120.206.47', '85.120.206.48', '85.120.206.49'], '5222')
+    listLogs = test.stormLogs()
+    print listLogs
+    # t = test.check()
+    # c = test.collectd()
+    # l = test.lsf()
+    # j = test.jmx()
+    # d = test.deploy()
+    # n = test.node()
+    # s = test.start()
+    # st = test.stop()
+    # ss = test.startSelective('lsf')
+    # sts = test.stopSelective('collectd')
+    # log = test.logs('lsf')
+    # conf = test.conf('collectd')
+    # print t
+    # print c
+    # print l
+    # print j
+    # print d
+    # print n
+    # print s
+    # print st
+    # print ss
+    # print sts
+    # print log
+    # print conf

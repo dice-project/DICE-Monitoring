@@ -62,6 +62,16 @@ export ES_HEAP_SIZE=2g
 sysctl -w vm.max_map_count=262144
 swapoff -a
 
+# TODO fix this so that it must be set before running bootstrap script
+#DMONHOME=/opt/IeAT-DICE-Repository
+#
+#if grep -q "DMONHOME" ~/.bashrc; then
+#    echo "DMON home dir is already set"
+#else
+#    echo "DMONHOME=/opt/IeAT-DICE-Repository" >> ~/.bashrc
+#    echo "DMON home dir set"
+#fi
+
 
 # Install Elasticsearch 2.2.0
 echo "Installing Elasticsearch ...."
@@ -85,6 +95,10 @@ echo "Installing Elasticsearch plugin marvel ....."
 /opt/kibana/bin/kibana plugin --install elasticsearch/marvel/latest
 
 
+echo "Setting up init script for dmon-es ..."
+cp $DMONHOME/src/init/dmon-es /etc/init.d/dmon-es
+chmod +x /etc/init.d/dmon-es
+update-rc.d dmon-es defaults 96 9
 
 # Install Logstash
 echo "Installing Logstash..."
@@ -92,6 +106,12 @@ cd /opt
 wget https://download.elastic.co/logstash/logstash/logstash-2.2.1.tar.gz
 tar zxf logstash-2.2.1.tar.gz
 ln -sf logstash-2.2.1 logstash
+
+
+echo "Setting up init script for dmon-ls ..."
+cp $DMONHOME/src/init/dmon-ls /etc/init.d/dmon-ls
+chmod +x /etc/init.d/dmon-ls
+update-rc.d dmon-ls defaults 96 9
 
 #Setup Logrotate
 echo "Setting up logrotate ..."

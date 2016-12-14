@@ -20,6 +20,7 @@ limitations under the License.
 from flask import send_file
 from flask import request
 from flask.ext.restplus import Resource, fields
+from flask import stream_with_context, Response, send_from_directory
 import os
 import jinja2
 import sys
@@ -27,9 +28,12 @@ import subprocess
 import platform
 import logging
 from logging.handlers import RotatingFileHandler
-
+import glob
+import tarfile
 from pyUtil import *
 from app import *
+import tempfile
+
 
 
 # directory location
@@ -46,6 +50,9 @@ lsfList = os.path.join(tmpDir, 'logstashforwarder.list')
 lsfGPG = os.path.join(tmpDir, 'GPG-KEY-elasticsearch')
 certLoc = '/opt/certs/logstash-forwarder.crt'
 
+stormLogDir = '/home/ubuntu/apache-storm-0.9.5/logs'
+
+
 # supported aux components
 # auxList = ['collectd', 'lsf', 'jmx']
 
@@ -59,8 +66,16 @@ nodeRoles = api.model('query details Model', {
 collectdConfModel = api.model('configuration details Model for collectd', {
     'LogstashIP': fields.String(required=True, default='127.0.0.1', description='IP of the Logstash Server'),
     'UDPPort': fields.String(required=True, default='25680', description='Port of UDP plugin from Logstash Server'),
-    'Interval': fields.String(required=False, default='15', description='Polling interval for all resources')
+    'Interval': fields.String(required=False, default='15', description='Polling interval for all resources'),
+    'Cassandra': fields.Integer(required=False, default=0, description='Configure GenericJMX for cassandra monitoring'),
+    'MongoDB': fields.Integer(required=False, default=0, description='Configure collectd for MongoDB monitoring'),
+    'MongoHost': fields.String(required=False, default='127.0.0.1', description='Configure MongoDBHost'),
+    'MongoDBPort': fields.String(required=False, default='27017', description='Configure MongoDBPort'),
+    'MongoDBUser': fields.String(required=False, default='', description='Configure MongoDB Username'),
+    'MongoDBPasswd': fields.String(required=False, default='password', description='Configure MongoDB Password'),
+    'MongoDBs': fields.String(required=False, default='admin', description='Configure MongoDBs')
 })
+
 
 lsfConfModel = api.model('configuration details Model for LSF', {
     'LogstashIP': fields.String(required=True, default='127.0.0.1', description='IP of the Logstash Server'),
@@ -131,13 +146,14 @@ class NodeDeployCollectd(Resource):
             app.logger.warning('[%s] : [WARN] Malformed request, json expected', datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             return response
 
-        reqKeyList = ['LogstashIP', 'UDPPort', 'Interval']
+        reqKeyList = ['LogstashIP', 'UDPPort', 'Interval', 'Cassandra', 'MongoDB', 'MongoHost', 'MongoDBPort',
+                      'MongoDBUser', 'MongoDBPasswd', 'MongoDBs']
         for k in request.json:
             app.logger.info('[%s] : [INFO] Key found %s', datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), k)
             if k not in reqKeyList:
                 response = jsonify({'Status': 'Unrecognized key %s' %(k)})
                 response.status_code = 400
-                app.logger.warning('[%s] : [WARN] UNsuported key  %s', datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), k)
+                app.logger.warning('[%s] : [WARN] Unsuported key  %s', datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), k)
                 return response
         if 'LogstashIP' not in request.json or 'UDPPort' not in request.json:
             response = jsonify({'Status': 'Missing key(s)'})
@@ -149,10 +165,49 @@ class NodeDeployCollectd(Resource):
         else:
             pollInterval = request.json['Interval']
 
+        if 'Cassandra' not in request.json:
+            cassandra = 0
+        else:
+            cassandra = request.json['Cassandra']
+
+        if 'MongoDB' not in request.json:
+            mongodb = 0
+            mongohost = 0
+            mongodbport = 0
+            mongodbuser = 0
+            mongodbpasswd = 0
+            mongodbs = 0
+        else:
+            mongodb = request.json['MongoDB']
+            if 'MongoHost' not in request.json:
+                mongohost = '127.0.0.1'
+            else:
+                mongohost = request.json['MongoHost']
+            if 'MongoDBPort' not in request.json:
+                mongodbport = '27017'
+            else:
+                mongodbport = request.json['MongoDBPort']
+            if 'MongoDBUser' not in request.json:
+                mongodbuser = ' '
+            else:
+                mongodbuser = request.json['MongoDBUser']
+            if 'MongoDBPasswd' not in request.json:
+                mongodbpasswd = 'password'
+            else:
+                mongodbpasswd = request.json['MongoDBPasswd']
+            if 'MongoDBs' not in request.json:
+                mongodbs = 'admin'
+            else:
+                mongodbs = request.json['MongoDBs']
+
         settingsDict = {'logstash_server_ip': request.json['LogstashIP'],
                         'logstash_server_port': request.json['UDPPort'],
                         'collectd_pid_file': '/var/run/collectd.pid',
-                        'poll_interval': pollInterval}
+                        'poll_interval': pollInterval,
+                        'cassandra': cassandra, 'mongodb': mongodb, 'mongohost': mongohost,
+                        'mongoPort': mongodbport, 'mongouser': mongodbuser,
+                        'mongopassword': mongodbpasswd, 'mongoDBs': mongodbs}
+
         aux.configureComponent(settingsDict, collectdTemp, collectdConf)
         aux.controll('collectd', 'restart')
         response = jsonify({'Status': 'Done',
@@ -198,12 +253,6 @@ class NodeDeployLSF(Resource):
                             'Message': 'LSF Stated'})
         response.status_code = 200
         return response
-
-
-@agent.route('/v1/jmx')
-class NodeDeployJMX(Resource):
-    def post(self):  # TODO:  implement or remove.
-        return "JMX redeploy"
 
 
 @agent.route('/v1/start')
@@ -363,6 +412,7 @@ class NodeMonitLogs(Resource):
                                     'Message': 'Cannot open log file'})
                 response.status_code = 500
                 return response
+            return send_file(clog, mimetype='text/plain', as_attachment=True)
         if auxComp == 'lsf':
             try:
                 clog = open(lsflog, 'w+')
@@ -373,8 +423,11 @@ class NodeMonitLogs(Resource):
                                     'Message': 'Cannot open log file'})
                 response.status_code = 500
                 return response
-
-        return send_file(clog, mimetype='text/plain', as_attachment=True)
+            return send_file(clog, mimetype='text/plain', as_attachment=True)
+        else:
+            response = jsonify({'Status': 'Unsupported comp' + auxComp})
+            response.status_code = 400
+            return response
 
 
 @agent.route('/v1/conf/<auxComp>')
@@ -406,8 +459,10 @@ class NodeMonitConf(Resource):
                 app.logger.error('[%s] : [ERROR] Opening logstash-forwarder conf file',
                                  datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             return send_file(lConf, mimetype='application/json', as_attachment=True)
-        if auxComp == 'jmx':  # TODO: jmxtrans handeling
-            return 'jmx'
+        else:
+            response = jsonify({'Status': 'Unsupported comp' + auxComp})
+            response.status_code = 400
+            return response
 
 
 @agent.route('/v1/check')
@@ -490,6 +545,102 @@ class AgentMetricsSystem(Resource):
             response.status_code = 404
             return response
 
+
+@agent.route('/v1/bdp/storm/logs')
+class FetchStormLogs(Resource):
+    def get(self):
+        stDir = os.getenv('STORM_LOG', stormLogDir)
+
+        logFile = os.path.join(stDir, 'worker-6700.log')
+        if not os.path.isfile(logFile):
+            app.logger.warning('[%s] : [WARN] Storm logfile not found at %s: ',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(logFile))
+
+            response = jsonify({'Status': 'Not Found', 'Message': 'No storm logfile found'})
+            response.status_code = 404
+            return response
+
+        def readFile(lgFile):
+            with open(lgFile) as f:
+                yield f.readline()
+        return Response(stream_with_context(readFile(logFile)))
+
+
+@agent.route('/v2/bdp/storm/logs')
+class FetchStormLogsSDAll(Resource):
+    def get(self):
+        stDir = os.getenv('STORM_LOG', stormLogDir)
+        lFile = []
+        workerFile = 'worker-*.log'
+        # logFile = os.path.join(stDir, workerFile)
+        for name in glob.glob(os.path.join(stDir, workerFile)):
+            lFile.append(name)
+        if not lFile:
+            app.logger.warning('[%s] : [WARN] No Storm worker logs found',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'No Storm worker logs found'})
+            response.status_code = 404
+            return response
+
+        tmpDir = tempfile.gettempdir()
+        tarlog = os.path.join(tmpDir, 'workerlogs.tar')
+        if os.path.isfile(tarlog):
+            os.remove(tarlog)
+            app.logger.warning('[%s] : [WARN] Old Storm workerlog detected and removed',
+                               datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+        out = tarfile.open(tarlog, mode='w')
+        try:
+            for file in lFile:
+                path, filename = os.path.split(file)
+                out.add(file, arcname=filename)
+        finally:
+            out.close()
+            app.logger.info('[%s] : [INFO] Storm log tar file created at %s containing %s',
+                             datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(tarlog), str(lFile))
+        if not os.path.isfile(tarlog):
+            app.logger.warning('[%s] : [WARN] Storm logfile tar not found at %s: ',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(tarlog))
+
+            response = jsonify({'Status': 'Not Found', 'Message': 'No storm tar logfile found'})
+            response.status_code = 404
+            return response
+        path, filename = os.path.split(tarlog)
+        return send_from_directory(tmpDir, filename, as_attachment=True, mimetype='application/tar')
+
+
+@agent.route('/v3/bdp/storm/logs')
+class FetchStormLogsSD(Resource):
+    def get(self):
+        stDir = os.getenv('STORM_LOG', stormLogDir)
+        lFile = []
+        workerFile = 'worker-' + ('[0-9]' * 4) + '.log'
+        # logFile = os.path.join(stDir, workerFile)
+        for name in glob.glob(os.path.join(stDir, workerFile)):
+            lFile.append(name)
+        if len(lFile) > 1:
+            app.logger.error('[%s] : [ERROR] More then one Storm worker logfile, -> %s: ',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(lFile))
+            response = jsonify({'Status': 'To many worker logs', 'Logs': lFile})
+            response.status_code = 500
+            return response
+        if not lFile:
+            app.logger.warning('[%s] : [WARN] No Storm worker logs found',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            response = jsonify({'Status': 'No Storm worker logs found'})
+            response.status_code = 404
+            return response
+        logFile = lFile[0]
+        if not os.path.isfile(logFile):
+            app.logger.warning('[%s] : [WARN] Storm logfile not found at %s: ',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(logFile))
+
+            response = jsonify({'Status': 'Not Found', 'Message': 'No storm logfile found'})
+            response.status_code = 404
+            return response
+        path, filename = os.path.split(logFile)
+        return send_from_directory(stDir, filename, as_attachment=True, mimetype='text/plain')
+
+
 @agent.route('/v1test')
 class Test(Resource):
     def get(self):
@@ -511,7 +662,7 @@ class Test(Resource):
 
 
 if __name__ == '__main__':
-    handler = RotatingFileHandler(os.path.join(logDir, 'dmon-agent.log'), maxBytes=10000000, backupCount=5)
+    handler = RotatingFileHandler(os.path.join(logDir, 'dmon-agent.log'), maxBytes=100000000, backupCount=5)
     handler.setLevel(logging.INFO)
     app.logger.addHandler(handler)
     log = logging.getLogger('werkzeug')
