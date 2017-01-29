@@ -1,7 +1,6 @@
 # DICE-Project
-Personal Repository of Gabriel Iuhasz for H2020 DICE Project
 
-For furthere details please consult the following:
+For further details please consult the following:
 
 * [DICE Monitoring Platform (D-Mon)](https://github.com/igabriel85/IeAT-DICE-Repository/blob/master/src/README.md)
 	* [DICE Monitoring Agent](https://github.com/igabriel85/IeAT-DICE-Repository/blob/master/dmon-agent/README.md)
