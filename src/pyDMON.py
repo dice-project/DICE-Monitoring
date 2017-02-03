@@ -3943,12 +3943,6 @@ class LSCoreControllerInit(Resource):
                                    datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             return response
 
-        if checkPID(qSCore.LSCorePID) is True:
-            subprocess.call(['kill', '-9', str(qSCore.LSCorePID)])
-            app.logger.info('[%s] : [INFO] Killed LS Instance at %s',
-                                   datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
-                            str(qSCore.LSCorePID))
-
         try:
             template = templateEnv.get_template(lsTemp)
         # print >>sys.stderr, template
@@ -4066,74 +4060,22 @@ class LSCoreControllerInit(Resource):
                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(lsPidf),
                                str(qSCore.LSCorePID))
 
-        if checkPID(qSCore.LSCorePID) is True:
-            try:
-                subprocess.check_call(["service", "dmon-ls", "restart", qSCore.LSCoreHeap, qSCore.LSCoreWorkers])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot restart LS Core service with %s and %s",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
-                                 inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart LS Core'})
-                response.status_code = 500
-                return response
-            lsPID = check_proc(lsPIDFileLoc)
-            if not lsPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for ls core",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read lscore pid file'})
-                response.status_code = 500
-                return response
-            qSCore.ESCorePID = lsPID
-            qSCore.ESCoreStatus = 'Running'
-            response = jsonify({'Status': 'LS Core Restarted', 'PID': lsPID})
-            response.status_code = 201
+        try:
+            subprocess.check_call([
+                "initctl", "restart", "dmon-ls",
+                "heap_size={}".format(os.environ['LS_HEAP_SIZE'])
+            ])
+        except Exception as inst:
+            app.logger.error("[%s] : [ERROR] Cannot restart LS Core service with %s and %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                             inst.args)
+            response = jsonify({'Status': 'Error', 'Message': 'Cannot restart LS Core'})
+            response.status_code = 500
             return response
-        elif checkPID(int(lsPidf)) is True:
-            try:
-                subprocess.check_call(["service", "dmon-ls", "restart", qSCore.LSCoreHeap, qSCore.LSCoreWorkers])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot restart detached LS Core service with %s and %s",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
-                                 inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart detached LS Core'})
-                response.status_code = 500
-                return response
-            lsPID = check_proc(lsPIDFileLoc)
-            if not lsPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for ls core",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read ls core pid file'})
-                response.status_code = 500
-                return response
-            qSCore.LSCorePID = lsPID
-            qSCore.LSCoreStatus = 'Running'
-            response = jsonify({'Status': 'LS Core  Restarted and attached', 'PID': lsPID})
-            response.status_code = 201
-            return response
-        else:
-            try:
-                subprocess.check_call(["service", "dmon-ls", "start", qSCore.LSCoreHeap, qSCore.LSCoreWorkers])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot start LS Core service with %s and %s",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
-                                 inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot start LS Core'})
-                response.status_code = 500
-                return response
-            lsPID = check_proc(lsPIDFileLoc)
-            if not lsPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for ls core",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read lscore pid file'})
-                response.status_code = 500
-                return response
-            qSCore.LSCorePID = lsPID
-            qSCore.LSCoreStatus = 'Running'
-            response = jsonify({'Status': 'LS Core Started', 'PID': lsPID, 'Storm': stormStatus, 'YarnHistory': yarnStatus})
-            response.status_code = 201
-            app.logger.info("[%s] : [INFO] LS Core started with PID %s, Storm %s and YanrHistory %s",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), lsPID, stormStatus, yarnStatus)
-            return response
+        qSCore.ESCoreStatus = 'Running'
+        response = jsonify({'Status': 'LS Core Restarted', 'PID': 0})
+        response.status_code = 201
+        return response
 
 
 @dmon.route('/v1/overlord/core/ls/<hostFQDN>/status')
