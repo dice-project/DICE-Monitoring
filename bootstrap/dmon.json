@@ -1,0 +1,13 @@
+{
+  "java": {
+    "jdk_version": "8",
+    "install_flavor": "openjdk"
+  },
+  "cloudify": {
+    "node_id": "dmon-node",
+    "deployment_id": "dmon-deploy-id"
+  },
+  "dmon": {
+    "openssl_conf": "[req]\ndistinguished_name = req_distinguished_name\nx509_extensions = v3_req\nprompt = no\n[req_distinguished_name]\nC = SL\nST = Slovenia\nL =  Ljubljana\nO = Xlab\nCN = *\n[v3_req]\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid,issuer\nbasicConstraints = CA:TRUE\nsubjectAltName = IP:0.0.0.0\n[v3_ca]\nkeyUsage = digitalSignature, keyEncipherment\nsubjectAltName = IP:0.0.0.0\n"
+  }
+}
