@@ -1,6 +1,4 @@
 #DICE Cassandra Cluster Vagrant development env deploy
-#pre-alpha v0.1
-#TODO Legal Stuff
 
 
 
@@ -31,6 +29,14 @@ tar xvf apache-cassandra-2.2.3-bin.tar.gz
 
 #Fix owner
 chown -R vagrant.vagrant apache-cassandra-0.9.5/
+
+#Install dmon-agent 
+cd /opt
+wget https://github.com/dice-project/DICE-Monitoring/releases/download/latest-agent/dmon-agent.tar.gz
+tar xvf dmon-agent.tar.gz
+cd /opt/dmon-agent/
+pip install -r requirements.txt
+bash dmon-agent.sh
 
 cat > /etc/hosts <<EOF
 127.0.0.1       localhost
