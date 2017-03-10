@@ -593,13 +593,12 @@ def deployAgent(hostlist, userName, uPassword):
 					datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(hostlist))
 
 	agentUrl = 'wget %s' %(os.getenv('DMON_AGENT',
-                                     'https://github.com/igabriel85/IeAT-DICE-Repository/releases/download/v0.0.4-dmon-agent/dmon-agent.tar.gz'))
+                                     'https://github.com/dice-project/DICE-Monitoring/releases/download/latest-agent/dmon-agent.tar.gz'))
 	app.logger.info('[%s] : [INFO] dmon-agent url %s',
 					datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), agentUrl)
 	try:
 		client.run_command(agentUrl)
 	except (AuthenticationException, UnknownHostException, ConnectionErrorException):
-		# print "Error while downloading dmon-agent"
 		app.logger.error('[%s] : [ERROR] Failed to copy dmon-agent',
 						 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
 		raise
@@ -623,11 +622,6 @@ def deployAgent(hostlist, userName, uPassword):
 		raise
 	app.logger.info('[%s] : [INFO] dmon-agent unpacked %s',
 					datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(hostlist))
-	# try:
-	# 	client.run_command('pip install -r /opt/dmon-agent/requirements.txt', sudo=True)
-	# except (AuthenticationException, UnknownHostException, ConnectionErrorException):
-	# 	print "Error while installing dmon-agent dependencies"
-	# 	raise
 
 
 def startAgent(hostlist, username, password):
@@ -636,7 +630,7 @@ def startAgent(hostlist, username, password):
 	:param username:
 	:param password:
 	'''
-	# print "Start Agents"
+
 	app.logger.info('[%s] : [INFO] dmon-agent hostlist received %s',
 					datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(hostlist))
 	client = ParallelSSHClient(hostlist, user=username, password=password)
@@ -646,7 +640,6 @@ def startAgent(hostlist, username, password):
 			for line in agentStart[host]['stdout']:
 				app.logger.info('[%s] : [INFO] Host %s -> %s', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), host, line)
 	except (AuthenticationException, UnknownHostException, ConnectionErrorException):
-		# print "An exception has occurred while starting dmon-agent!"
 		app.logger.error('[%s] : [ERROR] Failed to start dmon-agent',
 						 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
 		raise

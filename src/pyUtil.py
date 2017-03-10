@@ -31,6 +31,8 @@ from dbModel import *
 from greenletThreads import *
 from urlparse import urlparse
 import pandas as pd
+import psutil
+
 
 
 def portScan(addrs, ports):
@@ -140,6 +142,7 @@ class AgentResourceConstructor():
     startr = '/start'
     stopr = '/stop'
     slogs = '/bdp/storm/logs'
+    shutDown = '/shutdown'
 
     def __init__(self, IPList, Port):
         self.IPList = IPList
@@ -248,6 +251,13 @@ class AgentResourceConstructor():
             logList.append(resource)
         return logList
 
+    def shutdownAgent(self):
+        shutdownList = []
+        for ip in self.IPList:
+            resource = 'http://%s:%s%s%s' %(ip, self.Port, AgentResourceConstructor.uriRoot, AgentResourceConstructor.shutDown)
+            shutdownList.append(resource)
+        return shutdownList
+
 
 def dbBackup(db, source, destination, version=1):
     '''
@@ -272,7 +282,7 @@ def detectStormTopology(ip, port=8080):
     '''
     url = 'http://%s:%s/api/v1/topology/summary' %(ip, port)
     try:
-        r = requests.get(url, timeout=2)
+        r = requests.get(url, timeout=DMON_TIMEOUT)
     except requests.exceptions.Timeout:
         app.logger.error('[%s] : [ERROR] Cannot connect to %s timedout',
                          datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(url))
@@ -314,7 +324,7 @@ def checkStormSpoutsBolts(ip, port, topology):
         return 0, 0
     url = 'http://%s:%s/api/v1/topology/%s' %(ip, port, topology)
     try:
-        r = requests.get(url, timeout=2)
+        r = requests.get(url, timeout=DMON_TIMEOUT)
     except requests.exceptions.Timeout:
         app.logger.error('[%s] : [ERROR] Cannot connect to %s timedout',
                          datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(url))
@@ -382,7 +392,7 @@ class DetectBDService():
         if qDBS is not None:
             yhUrl = 'http://%s:%s/ws/v1/history/mapreduce/jobs'%(qDBS.yarnHEnd, qDBS.yarnHPort)
             try:
-                yarnResp = requests.get(yhUrl)
+                yarnResp = requests.get(yhUrl, timeout=DMON_TIMEOUT)
                 yarnData = yarnResp.json()
             except Exception as inst:
                 app.logger.error('[%s] : [ERROR] Cannot connect to yarn history service with %s and %s',
@@ -487,7 +497,7 @@ class DetectBDService():
         if qDBS is not None:
             yhUrl = 'http://%s:%s/api/v1/applications'%(qDBS.sparkHEnd, qDBS.sparkHPort)
             try:
-                sparkResp = requests.get(yhUrl)
+                sparkResp = requests.get(yhUrl, timeout=DMON_TIMEOUT)
                 ysparkData = sparkResp.json()
             except Exception as inst:
                 app.logger.error('[%s] : [ERROR] Cannot connect to spark history service with %s and %s',
@@ -715,12 +725,34 @@ def check_proc(pidfile, wait=5):
         if tick > wait:
             return 0
     stats_pid = open(pidfile)
-    pid = int(stats_pid.read())
+    try:
+        pid = int(stats_pid.read())
+    except ValueError:
+        return 0
     return pid
 
 
-
-
+def sysMemoryCheck(needStr):
+    '''
+    :param needStr: heap size string setting of the format "512m"
+    :return: returns True or False depending if check is successful or not and returns the final heap size
+    '''
+    mem = psutil.virtual_memory().total
+    need = int(needStr[:-1])
+    unit = needStr[-1]
+    if unit == 'm':
+        hmem = mem / 1024 / 1024
+    elif unit == 'g':
+        hmem = mem / 1024 / 1024 / 1024
+    else:
+        app.logger.error('[%s] : [ERROR] Unknown heap size format %s',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), needStr)
+        hmem = mem / 1024 / 1024
+        return False, "%s%s" % (str(hmem / 2), 'm')
+    if need > hmem:
+        return False, "%s%s" % (str(hmem / 2), unit)
+    else:
+        return True, needStr
 
 if __name__ == '__main__':
 #     db.create_all()

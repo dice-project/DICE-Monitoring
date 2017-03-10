@@ -424,8 +424,8 @@ class ESCoreConnector:
             else:
                 res = self.esInstance.index(index=index, doc_type=typeD, body=body, id=id)
         except Exception as inst:
-            app.logger.error('[%s] : [ERROR] Exception has occured while pushing anomaly with type %s at arguments %s',
-                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            app.logger.error('[%s] : [ERROR] Exception has occured while pushing document %s with type %s at arguments %s',
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), typeD, type(inst), inst.args)
             return 0
         return res
 
@@ -541,6 +541,31 @@ class QueryConstructor():
         qstring = "type:\"maptask-metrics\" AND serviceType:\"jvm\" AND hostname:\"%s\" AND ProcessName:\"%s\"" % (
         host, process)
         file = 'JVM_MapTasksTask_%s_%s.csv' % (host, process)
+        return qstring, file
+
+    def stormString(self):
+        qstring = "type:\"storm-topology\""
+        file = 'Storm.csv'
+        return qstring, file
+
+    def cassandraCounterString(self, host):
+        qstring = "plugin:\"GenericJMX\" AND collectd_type:\"counter\" host:\"%s\"" % host
+        file = "Cassandra_counter_%s.csv" % host
+        return qstring, file
+
+    def cassandraGaugeString(self, host):
+        qstring = "plugin:\"GenericJMX\" AND collectd_type:\"gauge\" host:\"%s\"" % host
+        file = "Cassandra_gauge_%s.csv" % host
+        return qstring, file
+
+    def mongodbCounterString(self, host):
+        qstring = "plugin:mongo AND collectd_type:counter AND host:\"%s\"" % host
+        file = "MongoDB_Counter_%s.csv" % host
+        return qstring, file
+
+    def mongodbGaugeString(self, host):
+        qstring = "plugin:mongo AND collectd_type:gauge AND host:\"%s\"" % host
+        file = "MongoDB_Gauge_%s.csv" % host
         return qstring, file
 
     def loadAverage(self):  # TODO
@@ -1126,6 +1151,157 @@ class QueryConstructor():
         cqueryd = cquery.to_dict()
         return cqueryd
 
+    def stormQuery(self, qstring, qgte, qlte, qsize, qinterval, bolts, spouts, wildCard=True, qtformat="epoch_millis",
+                   qmin_doc_count=1):
+        cquery = Dict()
+        cquery.query.filtered.query.query_string.query = qstring
+        cquery.query.filtered.query.query_string.analyze_wildcard = wildCard
+        cquery.query.filtered.filter.bool.must = [
+            {"range": {"@timestamp": {"gte": qgte, "lte": qlte, "format": qtformat}}}]
+        cquery.query.filtered.filter.bool.must_not = []
+        cquery.size = qsize
+
+        cquery.aggs["1"].date_histogram.field = "@timestamp"
+        cquery.aggs["1"].date_histogram.interval = qinterval
+        cquery.aggs["1"].date_histogram.time_zone = "Europe/Helsinki"
+        cquery.aggs["1"].date_histogram.min_doc_count = qmin_doc_count
+        cquery.aggs["1"].date_histogram.extended_bounds.min = qgte
+        cquery.aggs["1"].date_histogram.extended_bounds.max = qlte
+
+        # Storm metrics
+
+        cquery.aggs["1"].aggs["2"].avg.field = "executorsTotal"
+        cquery.aggs["1"].aggs["3"].avg.field = "msgTimeout"
+        cquery.aggs["1"].aggs["4"].avg.field = "tasksTotal"
+        cquery.aggs["1"].aggs["5"].avg.field = "workersTotal"
+        cquery.aggs["1"].aggs["6"].avg.field = "topologyStats_10m_acked"
+        cquery.aggs["1"].aggs["7"].avg.field = "topologyStats_10m_completeLatency"
+        cquery.aggs["1"].aggs["8"].avg.field = "topologyStats_10m_emitted"
+        cquery.aggs["1"].aggs["9"].avg.field = "topologyStats_10m_failed"
+        cquery.aggs["1"].aggs["10"].avg.field = "topologyStats_10m_transferred"
+        cquery.aggs["1"].aggs["11"].avg.field = "topologyStats_10m_window"
+        cquery.aggs["1"].aggs["12"].avg.field = "topologyStats_1d_acked"
+        cquery.aggs["1"].aggs["13"].avg.field = "topologyStats_1d_completeLatency"
+        cquery.aggs["1"].aggs["14"].avg.field = "topologyStats_1d_emitted"
+        cquery.aggs["1"].aggs["15"].avg.field = "topologyStats_1d_failed"
+        cquery.aggs["1"].aggs["16"].avg.field = "topologyStats_1d_transferred"
+        cquery.aggs["1"].aggs["17"].avg.field = "topologyStats_1d_window"
+        cquery.aggs["1"].aggs["18"].avg.field = "topologyStats_3h_acked"
+        cquery.aggs["1"].aggs["19"].avg.field = "topologyStats_3h_completeLatency"
+        cquery.aggs["1"].aggs["20"].avg.field = "topologyStats_3h_emitted"
+        cquery.aggs["1"].aggs["21"].avg.field = "topologyStats_3h_failed"
+        cquery.aggs["1"].aggs["22"].avg.field = "topologyStats_3h_transferred"
+        cquery.aggs["1"].aggs["23"].avg.field = "topologyStats_3h_window"
+        cquery.aggs["1"].aggs["24"].avg.field = "topologyStats_all_acked"
+        cquery.aggs["1"].aggs["25"].avg.field = "topologyStats_all_completeLatency"
+        cquery.aggs["1"].aggs["26"].avg.field = "topologyStats_all_emitted"
+        cquery.aggs["1"].aggs["27"].avg.field = "topologyStats_all_failed"
+        cquery.aggs["1"].aggs["28"].avg.field = "topologyStats_all_transferred"
+
+        gcounter = 29
+        for n in xrange(0, bolts):
+            cquery.aggs["1"].aggs[str(gcounter + 1)].avg.field = "bolts_%s_acked" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 2)].avg.field = "bolts_%s_capacity" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 3)].avg.field = "bolts_%s_emitted" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 4)].avg.field = "bolts_%s_executed" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 5)].avg.field = "bolts_%s_executors" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 6)].avg.field = "bolts_%s_failed" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 7)].avg.field = "bolts_%s_tasks" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 8)].avg.field = "bolts_%s_transferred" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 9)].avg.field = "bolts_%s_executeLatency" % str(n)
+            cquery.aggs["1"].aggs[str(gcounter + 10)].avg.field = "bolts_%s_processLatency" % str(n)
+            gcounter += 10
+
+        for t in xrange(0, spouts):
+            cquery.aggs["1"].aggs[str(gcounter + 1)].avg.field = "spouts_%s_acked" % str(t)
+            cquery.aggs["1"].aggs[str(gcounter + 2)].avg.field = "spouts_%s_emitted" % str(t)
+            cquery.aggs["1"].aggs[str(gcounter + 3)].avg.field = "spouts_%s_executors" % str(t)
+            cquery.aggs["1"].aggs[str(gcounter + 4)].avg.field = "spouts_%s_failed" % str(t)
+            cquery.aggs["1"].aggs[str(gcounter + 5)].avg.field = "spouts_%s_tasks" % str(t)
+            cquery.aggs["1"].aggs[str(gcounter + 6)].avg.field = "spouts_%s_transferred" % str(t)
+            cquery.aggs["1"].aggs[str(gcounter + 7)].avg.field = "spouts_%s_completeLatency" % str(t)
+            gcounter += 7
+
+        cqueryd = cquery.to_dict()
+        return cqueryd
+
+    def cassandraQuery(self, qstring, qgte, qlte, qsize, qinterval, wildCard=True, qtformat="epoch_millis",
+                       qmin_doc_count=1):
+        cquery = Dict()
+        cquery.query.filtered.query.query_string.query = qstring
+        cquery.query.filtered.query.query_string.analyze_wildcard = wildCard
+        cquery.query.filtered.filter.bool.must = [
+            {"range": {"@timestamp": {"gte": qgte, "lte": qlte, "format": qtformat}}}]
+        cquery.query.filtered.filter.bool.must_not = []
+        cquery.size = qsize
+
+        cquery.aggs["1"].date_histogram.field = "@timestamp"
+        cquery.aggs["1"].date_histogram.interval = qinterval
+        cquery.aggs["1"].date_histogram.time_zone = "Europe/Helsinki"
+        cquery.aggs["1"].date_histogram.min_doc_count = qmin_doc_count
+        cquery.aggs["1"].date_histogram.extended_bounds.min = qgte
+        cquery.aggs["1"].date_histogram.extended_bounds.max = qlte
+
+        # Cassandra Metrics
+        cquery.aggs["1"].aggs["3"].terms.field = "type_instance"
+        cquery.aggs["1"].aggs["3"].terms.size = 0
+        cquery.aggs["1"].aggs["3"].terms.order["1"] = "desc"
+        cquery.aggs["1"].aggs["3"].aggs["1"].avg.field = "value"
+
+        cqueryd = cquery.to_dict()
+        return cqueryd
+
+    def mongoDBCounterQuery(self, qstring, qgte, qlte, qsize, qinterval, wildCard=True, qtformat="epoch_millis",
+                            qmin_doc_count=1):
+        cquery = Dict()
+        cquery.query.filtered.query.query_string.query = qstring
+        cquery.query.filtered.query.query_string.analyze_wildcard = wildCard
+        cquery.query.filtered.filter.bool.must = [
+            {"range": {"@timestamp": {"gte": qgte, "lte": qlte, "format": qtformat}}}]
+        cquery.query.filtered.filter.bool.must_not = []
+        cquery.size = qsize
+
+        cquery.aggs["1"].date_histogram.field = "@timestamp"
+        cquery.aggs["1"].date_histogram.interval = qinterval
+        cquery.aggs["1"].date_histogram.time_zone = "Europe/Helsinki"
+        cquery.aggs["1"].date_histogram.min_doc_count = qmin_doc_count
+        cquery.aggs["1"].date_histogram.extended_bounds.min = qgte
+        cquery.aggs["1"].date_histogram.extended_bounds.max = qlte
+
+        # Cassandra Metrics
+        cquery.aggs["1"].aggs["3"].terms.field = "type_instance"
+        cquery.aggs["1"].aggs["3"].terms.size = 0
+        cquery.aggs["1"].aggs["3"].terms.order["1"] = "desc"
+        cquery.aggs["1"].aggs["3"].aggs["1"].avg.field = "value"
+
+        cqueryd = cquery.to_dict()
+        return cqueryd
+
+    def mongoDBGaugeQuery(self, qstring, qgte, qlte, qsize, qinterval, wildCard=True, qtformat="epoch_millis",
+                          qmin_doc_count=1):
+        cquery = Dict()
+        cquery.query.filtered.query.query_string.query = qstring
+        cquery.query.filtered.query.query_string.analyze_wildcard = wildCard
+        cquery.query.filtered.filter.bool.must = [
+            {"range": {"@timestamp": {"gte": qgte, "lte": qlte, "format": qtformat}}}]
+        cquery.query.filtered.filter.bool.must_not = []
+        cquery.size = qsize
+
+        cquery.aggs["1"].date_histogram.field = "@timestamp"
+        cquery.aggs["1"].date_histogram.interval = qinterval
+        cquery.aggs["1"].date_histogram.time_zone = "Europe/Helsinki"
+        cquery.aggs["1"].date_histogram.min_doc_count = qmin_doc_count
+        cquery.aggs["1"].date_histogram.extended_bounds.min = qgte
+        cquery.aggs["1"].date_histogram.extended_bounds.max = qlte
+
+        # Cassandra Metrics
+        cquery.aggs["1"].aggs["3"].terms.field = "type_instance"
+        cquery.aggs["1"].aggs["3"].terms.size = 0
+        cquery.aggs["1"].aggs["3"].terms.order["1"] = "desc"
+        cquery.aggs["1"].aggs["3"].aggs["1"].avg.field = "value"
+
+        cqueryd = cquery.to_dict()
+        return cqueryd
 
 class DataFormatter:
 
@@ -1277,6 +1453,28 @@ class DataFormatter:
         df_DN = self.chainMerge(lDN, colNamesDN, iterStart=2)
         return df_DN
 
+    def chainMergeCassandra(self, lcassandra):
+        '''
+        :return: -> merged Cassandra metrics
+        '''
+
+        # Read files
+        # Get column headers and gen dict with new col headers
+        colNamesCa = csvheaders2colNames(lcassandra[0], 'node1')
+        df_CA = self.chainMerge(lcassandra, colNamesCa, iterStart=2)
+        return df_CA
+
+    def chainMergeMongoDB(self, lmongoDB):
+        '''
+        :return: -> merged Cassandra metrics
+        '''
+
+        # Read files
+        # Get column headers and gen dict with new col headers
+        colNamesMG = csvheaders2colNames(lmongoDB[0], 'node1')
+        df_MG = self.chainMerge(lmongoDB, colNamesMG, iterStart=2)
+        return df_MG
+
     def listMerge(self, lFiles):
         '''
         :param lFiles: -> list of files
@@ -1394,7 +1592,8 @@ class DataFormatter:
                                          datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), rKey, rValue)
                             # print "%s -> %s"% (rKey, rValue)
                             dictMetrics['key'] = rValue
-                        elif query['aggs'].values()[0].values()[1].values()[0].values()[0].values()[0] =='type_instance.raw':
+                        elif query['aggs'].values()[0].values()[1].values()[0].values()[0].values()[0] =='type_instance.raw' or \
+                                        query['aggs'].values()[0].values()[1].values()[0].values()[0].values()[0] == 'type_instance':
                             app.logger.debug('[%s] : [DEBUG] Detected Memory type aggregation', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
                             # print "This is  rValue ________________> %s" % str(rValue)
                             # print "Keys of rValue ________________> %s" % str(rValue.keys())
@@ -1411,7 +1610,8 @@ class DataFormatter:
         # print "Required Metrics -> %s" % requiredMetrics
         csvOut = os.path.join(outDir, filename)
         cheaders = []
-        if query['aggs'].values()[0].values()[1].values()[0].values()[0].values()[0] == "type_instance.raw":
+        if query['aggs'].values()[0].values()[1].values()[0].values()[0].values()[0] == "type_instance.raw" or \
+                        query['aggs'].values()[0].values()[1].values()[0].values()[0].values()[0] == 'type_instance':
             app.logger.debug('[%s] : [DEBUG] Detected Memory type query', datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
             cheaders = requiredMetrics[0].keys()
         else:
@@ -1440,6 +1640,11 @@ class DataFormatter:
                     w = csv.DictWriter(csvfile, cheaders)
                     w.writeheader()
                     for metrics in requiredMetrics:
+                        if cheaders != metrics.keys():
+                            app.logger.error(
+                                '[%s] : [ERROR] Headers different from required metrics: headers -> %s, metrics ->%s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(cheaders),
+                                str(metrics.keys()))
                         w.writerow(metrics)
                 csvfile.close()
             except EnvironmentError:
@@ -1647,6 +1852,81 @@ class QueryEngine:
         app.logger.info('[%s] : [INFO] Querying System metrics complete',
                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
         return merged_df
+
+    def getCassandraMetrics(self, nodes, tfrom, to, qsize, qinterval, index):
+        lcassandraCounter = []
+        lcassandraGauge = []
+        app.logger.info('[%s] : [INFO] Querying Cassandra metrics ...',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+        for node in nodes:
+            cassandra, cassandra_file = self.qConstructor.cassandraCounterString(host=node)
+            cassandragauge, cassandragauge_file = self.qConstructor.cassandraGaugeString(host=node)
+
+            #Queries
+            qcassandra = self.qConstructor.cassandraQuery(cassandra, tfrom, to, qsize, qinterval)
+            qcassandragauge = self.qConstructor.cassandraQuery(cassandragauge, tfrom, to, qsize, qinterval)
+
+            # Execute query and convert response to csv
+            gcassandra = self.esConnector.aggQuery(index, qcassandra)
+            gcassandragauge = self.esConnector.aggQuery(index, qcassandragauge)
+
+            if not gcassandra or not gcassandragauge:
+                app.logger.warning('[%s] : [WARN] Empty response for cassandra queries',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                return 0, 0
+
+            lcassandraCounter.append(self.dformater.dict2csv(gcassandra, qcassandra, cassandra_file, df=True))
+            lcassandraGauge.append(self.dformater.dict2csv(gcassandragauge, qcassandragauge, cassandragauge_file, df=True))
+
+            # Merge and rename by node system Files
+
+        df_CA_Count = self.dformater.chainMergeCassandra(lcassandraCounter)
+        df_CA_Gauge = self.dformater.chainMergeCassandra(lcassandraGauge)
+
+        # df_CA = self.dformater.listMerge([df_CA_Count, df_CA_Gauge])
+        return df_CA_Count, df_CA_Gauge
+
+    def getMongoMetrics(self, nodes, tfrom, to, qsize, qinterval, index):
+        lmongoCounter = []
+        lmongoGauge = []
+        for node in nodes:
+            mongodbCounter, mongodbCounter_file = self.qConstructor.mongodbCounterString(host=node)
+            mongodbGauge, mongodbGauge_file = self.qConstructor.mongodbGaugeString(host=node)
+
+            # Queries
+            qmongodbCounter = self.qConstructor.mongoDBCounterQuery(mongodbCounter, tfrom, to, qsize, qinterval)
+            qmongodbGauge = self.qConstructor.mongoDBGaugeQuery(mongodbGauge, tfrom, to, qsize, qinterval)
+
+            # Execute query and convert response to csv
+            gmongodbGauge = self.esConnector.aggQuery(index, qmongodbGauge)
+            gmongodbCounter = self.esConnector.aggQuery(index, qmongodbCounter)
+
+            if not gmongodbCounter or not gmongodbGauge:
+                app.logger.warning('[%s] : [WARN] Empty response for mongodb queries',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+                return 0, 0
+
+            lmongoCounter.append(self.dformater.dict2csv(gmongodbCounter, qmongodbCounter, mongodbCounter_file, df=True))
+            lmongoGauge.append(self.dformater.dict2csv(gmongodbGauge, qmongodbGauge, mongodbGauge_file, df=True))
+
+
+        # Merge and rename by node system File
+        df_MD_Count = self.dformater.chainMergeMongoDB(lmongoCounter)
+        df_MD_Gauge = self.dformater.chainMergeMongoDB(lmongoGauge)
+
+        return df_MD_Count, df_MD_Gauge
+
+
+    def getStormMetrics(self, tfrom, to, qsize, qinterval, index, bolts, spouts):
+        app.logger.info('[%s] : [INFO] Querying Storm metrics ...',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+        storm, storm_file = self.qConstructor.stormString()
+        qstorm = self.qConstructor.stormQuery(storm, tfrom, to, qsize, qinterval, bolts=bolts, spouts=spouts)
+        gstorm = self.esConnector.aggQuery(index, qstorm)
+        df_storm = self.dformater.dict2csv(gstorm, qstorm, storm_file, df=True)
+        app.logger.info('[%s] : [INFO] Querying Storm metrics complete',
+                        datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+        return df_storm
 
     def merge(self, listDataframes):
         merged = self.dformater.listMerge(listDataframes)
