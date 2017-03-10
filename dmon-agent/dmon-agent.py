@@ -361,7 +361,7 @@ class NodeMonitStopSelective(Resource):
         try:
             aux.controll(auxComp, 'stop')
         except Exception as inst:
-            app.logger.error('[%s] : [ERROR] Error starting %s with : %s and %s',
+            app.logger.error('[%s] : [ERROR] Error stopping %s with : %s and %s',
                              datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(auxComp), type(inst), inst.args)
             response = jsonify({'Status': type(inst),
                                'Message': inst.args})
@@ -550,6 +550,8 @@ class AgentMetricsSystem(Resource):
 class FetchStormLogs(Resource):
     def get(self):
         stDir = os.getenv('STORM_LOG', stormLogDir)
+        app.logger.warning('[%s] : [WARN] Storm log directory set to %s',
+                         datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), stDir)
 
         logFile = os.path.join(stDir, 'worker-6700.log')
         if not os.path.isfile(logFile):
@@ -570,6 +572,8 @@ class FetchStormLogs(Resource):
 class FetchStormLogsSDAll(Resource):
     def get(self):
         stDir = os.getenv('STORM_LOG', stormLogDir)
+        app.logger.warning('[%s] : [WARN] Storm log directory set to %s',
+                           datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), stDir)
         lFile = []
         workerFile = 'worker-*.log'
         # logFile = os.path.join(stDir, workerFile)
@@ -612,6 +616,8 @@ class FetchStormLogsSDAll(Resource):
 class FetchStormLogsSD(Resource):
     def get(self):
         stDir = os.getenv('STORM_LOG', stormLogDir)
+        app.logger.warning('[%s] : [WARN] Storm log directory set to %s',
+                           datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), stDir)
         lFile = []
         workerFile = 'worker-' + ('[0-9]' * 4) + '.log'
         # logFile = os.path.join(stDir, workerFile)
@@ -660,6 +666,53 @@ class Test(Resource):
         test[certLoc] = os.path.isfile(certLoc)
         return test
 
+
+@agent.route('/v1/shutdown')
+class ShutDownAgent(Resource):
+    def post(self):
+        if aux.checkAux('collectd'):
+            try:
+                aux.controll('collectd', 'stop')
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Error stopping %s with : %s and %s',
+                                 datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), 'collectd', type(inst), inst.args)
+                response = jsonify({'Status': type(inst),
+                                   'Message': inst.args})
+                response.status_code = 500
+                return response
+            collectdStatus = 'Stopped'
+        else:
+            collectdStatus = 'Offline'
+
+        if aux.checkAux('logstash-forwarder'):
+            try:
+                aux.controll('logstash-forwarder', 'stop')
+            except Exception as inst:
+                app.logger.error('[%s] : [ERROR] Error stopping %s with : %s and %s',
+                                 datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), 'logstash-forwarder', type(inst), inst.args)
+                response = jsonify({'Status': type(inst),
+                                   'Message': inst.args})
+                response.status_code = 500
+                return response
+            lsfStatus = 'Stopped'
+        else:
+            lsfStatus = 'Offline'
+
+        try:
+            shutdown_agent()
+        except Exception as inst:
+            app.logger.error('[%s] : [ERROR] Error while shutting down dmon-agent with: %s and %s',
+                             datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                             inst.args)
+            response = jsonify({'Status': 'Error',
+                                'Message': 'Shutdown failed'})
+            response.status_code = 500
+            return response
+        response = jsonify({'Status': 'Shuting down',
+                            'Collectd': collectdStatus,
+                            'LSF': lsfStatus})
+        response.status_code = 200
+        return response
 
 if __name__ == '__main__':
     handler = RotatingFileHandler(os.path.join(logDir, 'dmon-agent.log'), maxBytes=100000000, backupCount=5)
