@@ -23,8 +23,8 @@ __NOTE: I would also recommend installing vagrant snapshot tool__
 ```
 
 Once this is done download the vagrant configuration file into the directory in which you want the virtual cluster to be set up.
-* You can clone the up to date file from https://github.com/igabriel85/DICE-Project.git
-** The first part of this file contains an initialization script for CDH 5.4.0 which can be used outside of this configuration
+* You can clone the up to date file from https://github.com/dice-project/DICE-Monitoring.git
+* The first part of this file contains an initialization script for CDH 5.4.0 which can be used outside of this configuration
 
 This will create 4 VMs, one master and 3 slaves. Each running Ubuntu 12.04 64bit. It will install at startup the following important packages:
 * Oracle Java JDK 1.7 
