@@ -80,9 +80,9 @@ In order to start the top-ing service replace the _status_ command with _start_,
 
 ### Vagrant
 
-There are two vagrant files in this repository. The [first](https://github.com/igabriel85/IeAT-DICE-Repository/tree/master/Vagrant%20CDH%20Cluster) file creates a deployment of 4 VM on which it automatically installs the Cloudera Manager suite. 
+There are two vagrant files in this repository. The [first](https://github.com/dice-project/DICE-Monitoring/tree/master/vagrant/Vagrant%20CDH%20Cluster) file creates a deployment of 4 VM on which it automatically installs the Cloudera Manager suite. 
 
-The [second](https://github.com/igabriel85/IeAT-DICE-Repository/tree/master/Monitoring) file is a script that installs D-Mon and the ELK stack. This script replaces the use of '-i' flag in the above presented instructions. In order to create a local deployment for the D-Mon one has to follow the same steps as the ones previously described. 
+The [second](https://github.com/dice-project/DICE-Monitoring/tree/master/vagrant/Monitoring) file is a script that installs D-Mon and the ELK stack. This script replaces the use of '-i' flag in the above presented instructions. In order to create a local deployment for the D-Mon one has to follow the same steps as the ones previously described. 
 
 ### Chef
 * TODO This feature is still under investigation (not scheduled for M18)
