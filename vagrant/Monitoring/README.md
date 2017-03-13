@@ -7,7 +7,7 @@ Simple Vagrant box with the DICE Monitoring Solution (D-Mon) and ELK stack for t
   * python-pip
   * git
 * Installs python dependancies for D-Mon
-  * see [requirements.txt](https://github.com/igabriel85/IeAT-DICE-Repository/blob/master/src/requirements.txt) 	 
+  * see [requirements.txt](https://github.com/dice-project/DICE-Monitoring/blob/master/src/requirements.txt) 	 
 * Installs D-Mon
   * default location is in /opt directory 	
 * Elasticsearch
