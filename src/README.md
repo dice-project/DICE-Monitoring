@@ -30,7 +30,7 @@ This type of installation is for client/cloud deployment. It installs all python
 * Download the installation script to the desired host and make it executable, example using wget and chmod
 
 ```
-wget https://github.com/igabriel85/IeAT-DICE-Repository/releases/download/v0.1-install/install-dmon.sh && sudo chmod +x install-dmon.sh
+wget https://github.com/dice-project/DICE-Monitoring/releases/download/v1.0.0/install-dmon.sh && sudo chmod +x install-dmon.sh
 
 ```
 
