@@ -199,5 +199,13 @@ rm -rf /home/ubuntu/kibana-4.4.1-linux-x64*
 wget https://github.com/igabriel85/DICE-Monitoring/releases/download/logov01/kibana.svg
 mv kibana.svg /opt/kibana/optimize/bundles/src/ui/public/images
 
+timestamp() {
+date +"%Y-%m-%d_%H-%M-%S"
+}
+
+echo "Writing Lock file....."
+timestamp >> $DMONHOME/dmon.lock
+
+
 echo "Bootstrapping done!"
 
