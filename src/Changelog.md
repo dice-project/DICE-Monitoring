@@ -51,7 +51,7 @@
 	* added Chef based bootstrap resources
 	* added support for advanced MongoDB query aggregations
 	* added support for advanced Cassandra query aggregations 	
-	* implemented gracefull shutdown of supporting services
+	* implemented graceful shutdown of supporting services
 	* finalized default Storm visualisations
 	* added new timeout definition mechanism (env variable _DMON\_TIMEOUT_)
 	* added D-Mon artifact repository for ADT model saving and retrieval	 	
