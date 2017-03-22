@@ -1,6 +1,6 @@
 
 input {
-{% if 'yarn' in roles %}
+{% if 'yarn' in roles or 'cep' in roles %}
     lumberjack{
     port =>5000
     ssl_certificate => "{{sslcert}}"
@@ -56,14 +56,14 @@ udp {
  #Storm role not defined
     {% elif StormRestIP == "None"%}
     #No Storm IP set
-  
+
     {% elif StormRestPort == "None"%}
     #No Storm Port set
-    
+
 
     {% elif StormTopologyID == "None"%}
     #No Storm Topology set
-    
+
   {% else %}
 http_poller {
   urls => {
@@ -171,7 +171,7 @@ if [type] == "storm-topology"{
        "bolts_{{i}}_failed" => "%{[bolts][{{i}}][failed]}"
        "bolts_{{i}}_encodedBoltId" => "%{[bolts][{{i}}][encodedBoltId]}"
        {% endfor %}
-       
+
       {% for n in range(nSpout) %}
        "spouts_{{n}}_executors" => "%{[spouts][{{n}}][executors]}"
        "spouts_{{n}}_emitted" => "%{[spouts][{{n}}][emitted]}"
@@ -188,7 +188,7 @@ if [type] == "storm-topology"{
        "spouts_{{n}}_failed" => "%{[spouts][{{n}}][failed]}"
        "spouts_{{n}}_encodedSpoutId" => "%{[spouts][{{n}}][encodedSpoutId]}"
        {% endfor %}
-       
+
        "topologyStats_10m_window" => "%{[topologyStats][0][window]}"
        "topologyStats_10m_emitted" => "%{[topologyStats][0][emitted]}"
        "topologyStats_10m_transferred" => "%{[topologyStats][0][transferred]}"
@@ -218,26 +218,108 @@ if [type] == "storm-topology"{
        "topologyStats_all_failed" => "%{[topologyStats][3][failed]}"
        }
        remove_field => ["bolts", "spouts", "visualizationTable", "topologyStats"]
-       convert => {"bolts_0_capacity" => "float"}
     }
 
     mutate{
     {% for i in range(nBolt) %}
-        convert => {"bolts_{{i}}_capacity" => "float"}
-        convert => {"bolts_{{i}}_executeLatency" => "float"}
-        convert => {"bolts_{{i}}_processLatency" => "float"}
+        convert => ["bolts_{{i}}_capacity", "float"]
+        convert => ["bolts_{{i}}_executeLatency", "float"]
+        convert => ["bolts_{{i}}_processLatency", "float"]
     {% endfor %}
     {% for n in range(nSpout) %}
-        convert => {"spouts_{{n}}_completeLatency" => "float"}
+        convert => ["spouts_{{n}}_completeLatency", "float"]
     {% endfor %}
-        convert => {"topologyStats_10m_window" => "float"}
-        convert => {"topologyStats_10m_completeLatency" => "float"}
-        convert => {"topologyStats_3h_window" => "float"}
-        convert => {"topologyStats_3h_completeLatency" => "float"}
-        convert => {"topologyStats_1d_window" => "float"}
-        convert => {"topologyStats_1d_completeLatency" => "float"}
-        convert => {"topologyStats_all_completeLatency" => "float"}
+        convert => ["topologyStats_10m_window", "float"]
+        convert => ["topologyStats_10m_completeLatency", "float"]
+        convert => ["topologyStats_3h_window", "float"]
+        convert => ["topologyStats_3h_completeLatency", "float"]
+        convert => ["topologyStats_1d_window", "float"]
+        convert => ["topologyStats_1d_completeLatency", "float"]
+        convert => ["topologyStats_all_completeLatency", "float"]
     }
+    {% for i in range(nBolt) %}
+        if [bolts_{{i}}_errorLapsedSecs] == "%{[bolts][{{i}}][errorLapsedSecs]}"
+        {
+            mutate {
+                replace => { "bolts_{{i}}_errorLapsedSecs" => 0 }
+                convert => { "bolts_{{i}}_errorLapsedSecs" => "float" }
+            }
+        }
+    {% endfor %}
+
+    {% for n in range(nSpout) %}
+        if [spouts_{{n}}_errorLapsedSecs] == "%{[spouts][{{n}}][errorLapsedSecs]}"
+        {
+            mutate {
+                replace => { "spouts_{{n}}_errorLapsedSecs" => 0 }
+                convert => { "spouts_{{n}}_errorLapsedSecs" => "float" }
+            }
+        }
+    {% endfor %}
+
+        if [topologyStats_10m_acked] == "%{[topologyStats][0][acked]}"
+        {
+          mutate {
+            replace => { "topologyStats_10m_acked" => 0 }
+            convert => { "topologyStats_10m_acked" => "float" }
+          }
+        }
+
+        if [topologyStats_10m_failed] == "%{[topologyStats][0][failed]}"
+        {
+          mutate {
+            replace => { "topologyStats_10m_failed" => 0 }
+            convert => { "topologyStats_10m_failed" => "float" }
+          }
+        }
+
+        if [topologyStats_3h_acked] == "%{[topologyStats][1][acked]}"
+        {
+          mutate {
+            replace => { "topologyStats_3h_acked" => 0 }
+            convert => { "topologyStats_3h_acked" => "float" }
+          }
+        }
+
+        if [topologyStats_3h_failed] == "%{[topologyStats][1][failed]}"
+        {
+          mutate {
+            replace => { "topologyStats_3h_failed" => 0 }
+            convert => { "topologyStats_3h_failed" => "float" }
+          }
+        }
+
+        if [topologyStats_1d_acked] == "%{[topologyStats][2][acked]}"
+        {
+          mutate {
+            replace => { "topologyStats_1d_acked" => 0 }
+            convert => { "topologyStats_1d_acked" => "float" }
+          }
+        }
+
+        if [topologyStats_1d_failed] == "%{[topologyStats][2][failed]}"
+        {
+          mutate {
+            replace => { "topologyStats_1d_failed" => 0 }
+            convert => { "topologyStats_1d_failed" => "float" }
+          }
+        }
+
+        if [topologyStats_all_acked] == "%{[topologyStats][3][acked]}"
+        {
+          mutate {
+            replace => { "topologyStats_all_acked" => 0 }
+            convert => { "topologyStats_all_acked" => "float" }
+          }
+        }
+
+        if [topologyStats_all_failed] == "%{[topologyStats][3][failed]}"
+        {
+          mutate {
+            replace => { "topologyStats_all_failed" => 0 }
+            convert => { "topologyStats_all_failed" => "float" }
+          }
+        }
 }
 if [type] == "storm-topSum"{
   mutate {
@@ -480,6 +562,20 @@ if [type]=="mrappmaster-metrics"{
 {% else %}
 #No HDFS defined
 {% endif %}
+
+{% if 'cep' in roles %}
+    if [type] == "cep-posidonia"{
+  grok{
+    break_on_match => false
+
+    match=>["message","\A%{TIME} %{NOTSPACE} %{SYSLOG5424SD} %{SYSLOGPROG} %{NOTSPACE} %{WORD:cType};%{WORD:DComp};COMPONENT=%{WORD:Component};METHOD=%{WORD:method};MS=%{NUMBER:ms:float};SHIP=%{NUMBER:ship:int}"]
+    match=>["message","\A%{TIME} %{NOTSPACE} %{SYSLOG5424SD} %{SYSLOGPROG} %{NOTSPACE} %{WORD:cType};%{WORD:DComp};MMSI=%{NUMBER:mmsi:int};LON=%{NUMBER:longitude:float};LAT=%{NUMBER:latitude:float}"]
+    }
+}
+{% else %}
+# No CEP defined
+{% endif %}
+
 }
 output {
     if [type]=="yarn-history"{
