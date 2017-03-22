@@ -598,7 +598,14 @@ def checkCoreState(esPidf, lsPidf, kbPidf):  #TODO: works only for local deploym
     else:
         with open(esPidf) as esPid:
             vpid = esPid.read()
-            esStatus = checkPID(int(vpid))
+            app.logger.info('[%s] : [INFO] ES PID read type is %s',
+                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(vpid))
+            try:
+                esStatus = checkPID(int(vpid))
+            except ValueError:
+                app.logger.warning('[%s] : [WARN] ES PID read type is %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(vpid))
+                esStatus = False
             if esStatus:
                 if qESCore is None:
                     app.logger.warning('[%s] : [WARN] No ES Core service registered to DMon',
@@ -629,7 +636,12 @@ def checkCoreState(esPidf, lsPidf, kbPidf):  #TODO: works only for local deploym
     else:
         with open(lsPidf) as lsPid:
             wpid = lsPid.read()
-            lsStatus = checkPID(int(wpid))
+            try:
+                lsStatus = checkPID(int(wpid))
+            except ValueError:
+                app.logger.warning('[%s] : [WARN] LS PID read type is %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(wpid))
+                lsStatus = False
             if lsStatus:
                 if qLSCore is None:
                     app.logger.warning('[%s] : [WARN] No LS Core service registered to DMon',
@@ -658,7 +670,12 @@ def checkCoreState(esPidf, lsPidf, kbPidf):  #TODO: works only for local deploym
     else:
         with open(kbPidf) as kbPid:
             qpid = kbPid.read()
-            kbStatus = checkPID(int(qpid))
+            try:
+                kbStatus = checkPID(int(qpid))
+            except ValueError:
+                app.logger.warning('[%s] : [WARN] KB PID read type is %s',
+                                datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(qpid))
+                kbStatus = False
             if kbStatus:
                 if qKBCore is None:
                     app.logger.warning('[%s] : [WARN] No KB Core service registered to DMon',
