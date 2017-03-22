@@ -3,14 +3,15 @@ ARCH=`uname -s`
 DIR=
 RE='^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
 RENR='^[0-9]+$'
-export ES_HEAP_SIZE=4g
-export LS_HEAP_SIZE=1024m
+export ES_HEAP_SIZE=1g
+export LS_HEAP_SIZE=512m
 export ES_USE_GC_LOGGING=yes
 export LS_VERSION="2.2.0"
 export KB_VERSION="4.3.1"
 export DMON_TIMEOUT=5
+export DMON_REPO="/opt/DICE-Monitoring/src/repository"
 #DMON Agent archive location
-export DMON_AGENT="https://github.com/igabriel85/IeAT-DICE-Repository/releases/download/v0.0.4-dmon-agent/dmon-agent.tar.gz"
+export DMON_AGENT="https://github.com/dice-project/DICE-Monitoring/releases/download/latest-agent/dmon-agent.tar.gz"
 #Logging can be set to INFO, WARN or ERROR
 export DMON_LOGGING="INFO"
 
