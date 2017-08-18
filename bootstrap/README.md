@@ -73,14 +73,22 @@ Cloudify deployment
 -------------------
 
 This process will create a new node in the target platform (FCO or OpenStack)
-and install the whole DMon stack on top of it. It requires a Cloudify Manager
-to be installed at the `CFY_MANAGER_HOST` address.
+and install the whole DMon stack on top of it.
 
 ### Preparing environment
 
-At the workstation node (i.e., our laptop, desktop PC where we install from),
-we need to have the Cloudify Manager CLI installed. The following steps
-are based on the [official documentation][CloudifyManagerBootstrap]:
+We will assume that we have arrived here from having [just installed the
+DICE Deployment Service and Cloudify Manager](https://github.com/dice-project/DICE-Deployment-Service/blob/master/doc/AdminGuide.md). Previously we have created a `~/dds` folder, which contains a Python virtual environment `venv/`
+and a DICE Deployment Service code folder `DICE-Deployment-Service`. If that is
+the case, we make sure that the virtual environment is activated and that the
+existing environment variables are sourced:
+
+    $ . ~/dds/venv/bin/activate
+    $ . ~/dds/DICE-Deployment-Service/dds-config.inc.sh
+
+If this works, proceed to [preparing working environment](#preparing-working-environment)
+
+If this is not the case, then ... **TODO**
 
 For Redhat related GNU/Linux distributions, following packages need to be
 installed: `python-virtualenv` and `python-devel`. Adjust properly for
@@ -89,49 +97,77 @@ Ubuntu and the like.
 Now create new folder, create new python virtual environment and install
 `cloudify` package.
 
-    $ mkdir -p ~/dice && cd ~/dice
+    $ mkdir -p ~/dds && cd ~/dds
     $ virtualenv venv
     $ . venv/bin/activate
-    $ pip install cloudify==3.4.0
+    $ pip install cloudify==3.4.2
+    $ pip install -U requests[security]
 
-Next we change to the directory containing the deployment blueprint and
-connect the Cloudify CLI client to the Cloudify Manager. Note that
-for the secured Cloudify Manager, we need to set the credentials in the
-environment variables `CLOUDIFY_USERNAME` and `CLOUDIFY_PASSWORD`.
+Build the configuration environment for your Cloudify Manager instance, making
+sure to replace `CFY_USERNAME` and `CFY_PASSWORD` with the actual values:
 
-    $ cd ~/IeAT-DICE-Repository/bootstrap
-    $ export CLOUDIFY_USERNAME=admin
-    $ export CLOUDIFY_PASSWORD='OurCfyMngPassword'
-    $ cfy -t $CFY_MANAGER_HOST
+    $ mkdir ~/cfy-manager && cd ~/cfy-manager
+    $ cp $CLOUDIFY_SSL_CERT cfy.crt
+    $ echo "export CLOUDIFY_USERNAME=CFY_USERNAME" > cloudify.inc.sh
+    $ echo "export CLOUDIFY_PASSWORD=CFY_PASSWORD" >> cloudify.inc.sh
+    $ echo "export CLOUDIFY_SSL_CERT=$PWD/cfy.crt" >> cloudify.inc.sh
 
-[CloudifyManagerBootstrap]:http://docs.getcloudify.org/3.4.0/manager/bootstrapping/
+### Preparing working environment
+
+TODO
+
+    $ mkdir -p ~/dmon && cd ~/dmon
+    $ git clone --depth 1 --branch master \
+        https://github.com/dice-project/DICE-Monitoring.git
+    $ cd DICE-Monitoring/bootstrap
+
+    $ . ~/cfy-manager/cloudify.inc.sh
+    $ cfy init
+    $ cfy use -t CFY_ADDRESS --port CFY_PORT
+
+Make sure you replace `CFY_*` placeholders with Cloudify Manager data. To test
+if everything works, execute `cfy status`. This command should output
+something similar to this:
+
+    Getting management services status... [ip=109.231.122.46]
+    Services:
+    +--------------------------------+---------+
+    |            service             |  status |
+    +--------------------------------+---------+
+    | InfluxDB                       | running |
+    | Celery Management              | running |
+    | Logstash                       | running |
+    | RabbitMQ                       | running |
+    | AMQP InfluxDB                  | running |
+    | Manager Rest-Service           | running |
+    | Cloudify UI                    | running |
+    | Webserver                      | running |
+    | Riemann                        | running |
+    | Elasticsearch                  | running |
+    +--------------------------------+---------+
 
 ### Preparing inputs
 
-The blueprint deployment needs a few parameters to be specified at this point.
-Use an `inputs-$PLATFORM.example.yaml` for your platform as a template to fill
-in, e.g., for the OpenStack:
+Installation of DICE Monitoring Service depends on environment parameters we set
+earlier in `~/dds/DICE-Deployment-Service/dds-config.inc.sh` and the ones that
+we need to provide in `config.inc.sh`. Use your editor to provide the
+parameters:
 
-    $ cp inputs-openstack.example.yaml inputs-openstack.yaml
+    $ $EDITOR config.inc.sh
 
-Use a text editor to replace the values set in the inputs template with the
-values that will apply to your deploy. To do this, follow the comments in the
-`inputs-openstack.yaml` file.
+Then, source this configuration file:
 
-### Executing deployment
+    $ . config.inc.sh
 
-To run the deployment of the DMon blueprint, use convenience scripts (which, in
-turn, call `cfy`):
+### Running the installation
 
-    $ ./up.sh openstack dmon-main
+To start the installation, choose a name for the deployment (or leave the
+default name `dmon`) and run the installation script: **TODO** actual output
 
-Here, `openstack` is the target platform, and the script will use this name to
-choose the blueprint file (`openstack.yaml`) and the inputs file
-(`inputs-openstack.yaml`). The `dmon-main` string names the deployment in the
-Cloudify Manager.
+    $ ./install-dmon.sh dmon
 
 ### Removing deployment
 
 The DMon deployment can be uninstalled using the following call:
 
-    $ ./dw.sh dmon-main
+    $ ./dw.sh dmon
