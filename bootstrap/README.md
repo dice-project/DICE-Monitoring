@@ -77,58 +77,67 @@ and install the whole DMon stack on top of it.
 
 ### Preparing environment
 
-We will assume that we have arrived here from having [just installed the
-DICE Deployment Service and Cloudify Manager](https://github.com/dice-project/DICE-Deployment-Service/blob/master/doc/AdminGuide.md). Previously we have created a `~/dds` folder, which contains a Python virtual environment `venv/`
-and a DICE Deployment Service code folder `DICE-Deployment-Service`. If that is
-the case, we make sure that the virtual environment is activated and that the
-existing environment variables are sourced:
+This approach requires a running Cloudify Manager in the infrastructure
+environment. If you do not have it installed yet, you will find complete
+instructions for installing Cloudify Manager, DICE Deployment Service and
+DICE Monitoring Platform in [these instructions][DDS-AdminGuide].
 
-    $ . ~/dds/venv/bin/activate
-    $ . ~/dds/DICE-Deployment-Service/dds-config.inc.sh
+For an existing Cloudify Manager instance, please note down:
 
-If this works, proceed to [preparing working environment](#preparing-working-environment)
+* IP address of the service - `CFY_ADDRESS`
+* Port for the service (usually 443) - `CFY_PORT`
+* Administrator's username - `CFY_USERNAME`
+* Administrator's password - `CFY_PASSWORD`
 
-If this is not the case, then ... **TODO**
+Obtain the DICE Deployment Service code (it contains useful tools and
+configuration file templates):
 
-For Redhat related GNU/Linux distributions, following packages need to be
-installed: `python-virtualenv` and `python-devel`. Adjust properly for
-Ubuntu and the like.
+    $ mkdir ~/dds && cd ~/dds
+    $ git clone --depth 1 --branch master \
+        https://github.com/dice-project/DICE-Deployment-Service.git
 
-Now create new folder, create new python virtual environment and install
-`cloudify` package.
-
-    $ mkdir -p ~/dds && cd ~/dds
-    $ virtualenv venv
-    $ . venv/bin/activate
-    $ pip install cloudify==3.4.2
-    $ pip install -U requests[security]
-
-Build the configuration environment for your Cloudify Manager instance, making
-sure to replace `CFY_USERNAME` and `CFY_PASSWORD` with the actual values:
-
-    $ mkdir ~/cfy-manager && cd ~/cfy-manager
-    $ cp $CLOUDIFY_SSL_CERT cfy.crt
-    $ echo "export CLOUDIFY_USERNAME=CFY_USERNAME" > cloudify.inc.sh
-    $ echo "export CLOUDIFY_PASSWORD=CFY_PASSWORD" >> cloudify.inc.sh
-    $ echo "export CLOUDIFY_SSL_CERT=$PWD/cfy.crt" >> cloudify.inc.sh
-
-### Preparing working environment
-
-TODO
+Next, obtain the DICE Monitoring Platform's code:
 
     $ mkdir -p ~/dmon && cd ~/dmon
     $ git clone --depth 1 --branch master \
         https://github.com/dice-project/DICE-Monitoring.git
     $ cd DICE-Monitoring/bootstrap
 
-    $ . ~/cfy-manager/cloudify.inc.sh
+Set up the Python virtual environment. For RedHat related GNU/Linux
+distributions, following packages need to be installed: `python-virtualenv` and
+`python-devel`. Adjust properly for Ubuntu and the like. Then run:
+
+    $ virtualenv venv
+    $ . venv/bin/activate
+    $ pip install cloudify==3.4.2
+    $ pip install -U requests[security]
+
+We now have the Cloudify command line tools installed. Next, we will configure
+them. This involves obtaining the service's TLS certificate. Along the way, we
+will set up the environment variables. Please replace the `CFY_*` strings with
+proper values:
+
+    $ export CFY_ADDRESS=CFY_ADDRESS
+    $ export CFY_PORT=CFY_PORT
+    $ openssl s_client -connect $CFY_ADDRESS:$CFY_PORT < /dev/null 2> /dev/null \
+        | openssl x509 -out cfy.crt
+
+We create a configuration file for Cloudify and source it. Again, replace
+the `CFY_*` with the actual values:
+
+    $ echo "export CLOUDIFY_USERNAME=CFY_USERNAME" > cloudify.inc.sh
+    $ echo "export CLOUDIFY_PASSWORD=CFY_PASSWORD" >> cloudify.inc.sh
+    $ echo "export CLOUDIFY_SSL_CERT=$PWD/cfy.crt" >> cloudify.inc.sh
+
+Source the configuration and configure the `cfy` tool:
+
+    $ . ./cloudify.inc.sh
     $ cfy init
-    $ cfy use -t CFY_ADDRESS --port CFY_PORT
+    $ cfy use -t $CFY_ADDRESS --port $CFY_PORT
 
-Make sure you replace `CFY_*` placeholders with Cloudify Manager data. To test
-if everything works, execute `cfy status`. This command should output
-something similar to this:
+The tool should now work with your Cloudify Manager:
 
+    $ cfy status
     Getting management services status... [ip=109.231.122.46]
     Services:
     +--------------------------------+---------+
@@ -148,26 +157,98 @@ something similar to this:
 
 ### Preparing inputs
 
-Installation of DICE Monitoring Service depends on environment parameters we set
-earlier in `~/dds/DICE-Deployment-Service/dds-config.inc.sh` and the ones that
-we need to provide in `config.inc.sh`. Use your editor to provide the
-parameters:
+From the DICE Deployment Service code's `install/` folder, select a suitable
+`PLATFORM-dds-config.inc.sh`, where `PLATFORM` is either `aws`, `fco` or
+`openstack`, and copy it into your working folder. For example, if your cloud
+platform is AWS, use:
+
+    $ cp ~/dds/DICE-Deployment-Service/install/openstack-dds-config.inc.sh \
+        dds-config.inc.sh
+
+Open the `dds-config.inc.sh` for editing and supply the actual values to the
+variables. Use the comments in the template and instructions from
+[this guide][DDS-AdminGuide] to help you:
+
+    $ $EDITOR dds-config.inc.sh
+
+We need to edit one more configuration file, `config.inc.sh`, which contains
+settings specific to the DICE Monitoring Platform:
 
     $ $EDITOR config.inc.sh
 
-Then, source this configuration file:
+Then, source both configuration files:
 
+    $ . dds-config.inc.sh
     $ . config.inc.sh
 
 ### Running the installation
 
 To start the installation, choose a name for the deployment (or leave the
-default name `dmon`) and run the installation script: **TODO** actual output
+default name `dmon`) and run the installation script:
 
     $ ./install-dmon.sh dmon
+    Creating deployment inputs for DICE Monitoring Service
+    Running installation
+    Publishing blueprint
+    Uploading blueprint blueprint.yaml...
+    Blueprint uploaded. The blueprint's id is dmon
+    Creating deploy
+    Processing inputs source: inputs.yaml
+    Creating new deployment from blueprint dmon...
+    Deployment created. The deployment's id is dmon
+    Starting execution
+    Executing workflow install on deployment dmon [timeout=900 seconds]
+    Deployment environment creation is in progress...
+    [...]
+    Finished executing workflow install on deployment dmon
+    Outputs:
+    Retrieving outputs for deployment dmon...
+     - "kibana_url":
+         Description: Address of the Kibana web interface
+         Value: http://10.10.43.194:5601
+     - "dmon_address":
+         Description: Internal address of the DICE Monitoring services host
+         Value: 10.50.51.8
+
+    Obtaining outputs
+    Creating DICE Deployment Service's runtime inputs - the DMon values
+
+    -----------------------------------------------------------------------------
+    SUMMARY:
+      Kibana URL: http://10.10.43.194:5601
+      Private DMon address: 10.50.51.8
+    -----------------------------------------------------------------------------
+
+This step will take a while. When it is done, the summary section will show
+the data about the deployed DICE Monitoring Service. In particular, Kibana URL
+can be readily used with a browser.
+
+The script also produces a file `dmon_inputs.json`, which can be useful for
+configuring the DICE Deployment Service.
+
+### Configuring the DICE Deployment Service
+
+The best way to use DICE Monitoring is to let the DICE Deployment Service
+automatically register the applications being deployed. To do this, the
+DICE Deployment Service needs to be configured with the DICE Monitoring
+service's details. The previous step has produced the file `dmon_inputs.json`
+that we will use for this purpose. This file contains only the monitoring
+related inputs, therefore we have to merge it with the other inputs:
+
+    $ ~/dds/DICE-Deployment-Service
+    $ tools/merge-inputs.sh ~/dmon/DICE-Monitoring/bootstrap/dmon_inputs.json \
+        merged_inputs.json
+
+The result of this step is `merged_inputs.json`, which we can now send to
+the DICE Deployment Service:
+
+    $ dice-deploy-cli set-inputs merged_inputs.json
+
 
 ### Removing deployment
 
 The DMon deployment can be uninstalled using the following call:
 
     $ ./dw.sh dmon
+
+[DDS-AdminGuide]: https://github.com/dice-project/DICE-Deployment-Service/blob/master/doc/AdminGuide.md
