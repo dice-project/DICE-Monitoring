@@ -2654,83 +2654,21 @@ class ESCoreControllerInit(Resource):
 
         os.environ['ES_HEAP_SIZE'] = qESCore.ESCoreHeap
 
-        #check for running detached es core
-        if os.path.isfile(pidESLoc):
-            esPIDf = check_proc(pidESLoc)
-        else:
-            esPIDf = 0
-
-        if esPIDf != qESCore.ESCorePID:
-            app.logger.warning("[%s] : [WARN] Conflicting PID values found, detached pid -> %s, attached -> %s",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(esPIDf),
-                               str(qESCore.ESCorePID))
-
-        if checkPID(qESCore.ESCorePID) is True:
-            try:
-                subprocess.check_call(["service", "dmon-es", "restart", qESCore.ESCoreHeap])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot restart ES Core service with %s and %s",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart ES Core'})
-                response.status_code = 500
-                return response
-            esPID = check_proc_recursive(pidESLoc)
-            if not esPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
-                response.status_code = 500
-                return response
-            qESCore.ESCorePID = esPID
-            qESCore.ESCoreStatus = 'Running'
-            response = jsonify({'Status': 'ES Core Restarted', 'PID': esPID})
-            response.status_code = 201
+        try:
+            subprocess.check_call(["service", "dmon-es", "restart",
+                "heap_size={}".format(qESCore.ESCoreHeap)])
+        except Exception as inst:
+            app.logger.error("[%s] : [ERROR] Cannot restart ES Core service with %s and %s",
+                         datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
+            response = jsonify({'Status': 'Error', 'Message': 'Cannot restart ES Core'})
+            response.status_code = 500
             return response
-        elif checkPID(int(esPIDf)) is True:
-            try:
-                subprocess.check_call(["service", "dmon-es", "restart", qESCore.ESCoreHeap])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot restart detached ES Core service with %s and %s",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot restart detached ES Core'})
-                response.status_code = 500
-                return response
-            esPID = check_proc(pidESLoc)
-            if not esPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
-                response.status_code = 500
-                return response
-            qESCore.ESCorePID = esPID
-            qESCore.ESCoreStatus = 'Running'
-            response = jsonify({'Status': 'ES Core  Restarted and attached', 'PID': esPID})
-            response.status_code = 201
-            return response
-        else:
-            try:
-                subprocess.check_call(["service", "dmon-es", "start", qESCore.ESCoreHeap])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot start ES Core service with %s and %s",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst), inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot start ES Core'})
-                response.status_code = 500
-                return response
-            esPID = check_proc(pidESLoc)
-            if not esPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
-                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
-                response.status_code = 500
-                return response
-            qESCore.ESCorePID = esPID
-            qESCore.ESCoreStatus = 'Running'
-            response = jsonify({'Status': 'ES Core Started', 'PID': esPID})
-            response.status_code = 201
-            return response
-        # response = jsonify({'Status': 'ElasticSearch Core  PID ' + str(esPid)})
-        # response.status_code = 200
-        # return response
+        esPID = -1
+        qESCore.ESCorePID = esPID
+        qESCore.ESCoreStatus = 'Running'
+        response = jsonify({'Status': 'ES Core Restarted', 'PID': esPID})
+        response.status_code = 201
+        return response
 
 
 @dmon.route('/v2/overlord/core/es/<hostFQDN>/start')
@@ -2760,45 +2698,22 @@ class ESControllerStartInit(Resource):
 
         os.environ['ES_HEAP_SIZE'] = qESCoreStart.ESCoreHeap
 
-        # check for running detached es core
-        if os.path.isfile(pidESLoc):
-            esPIDf = check_proc(pidESLoc)
-        else:
-            esPIDf = 0
-
-        if esPIDf != qESCoreStart.ESCorePID:
-            app.logger.warning("[%s] : [WARN] Conflicting PID values found, detached pid -> %s, attached -> %s",
-                               datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(esPIDf),
-                               str(qESCoreStart.ESCorePID))
-        elif checkPID(int(esPIDf)) is True:
-            app.logger.info("[%s] : [INFO] ES Core alredy running with detached pid %s",
-                            datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
-                            str(qESCoreStart.ESCorePID))
-            response = jsonify({'Status': 'Detected detached ES Core instance', 'PID': esPIDf})
-            response.status_code = 200
+        try:
+            subprocess.check_call(["service", "dmon-es", "restart",
+                "heap_size={}".format(qESCoreStart.ESCoreHeap)])
+        except Exception as inst:
+            app.logger.error("[%s] : [ERROR] Cannot start ES Core service with %s and %s",
+                             datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
+                             inst.args)
+            response = jsonify({'Status': 'Error', 'Message': 'Cannot start ES Core'})
+            response.status_code = 500
             return response
-        else:
-            try:
-                subprocess.check_call(["service", "dmon-es", "start", qESCoreStart.ESCoreHeap])
-            except Exception as inst:
-                app.logger.error("[%s] : [ERROR] Cannot start ES Core service with %s and %s",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), type(inst),
-                                 inst.args)
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot start ES Core'})
-                response.status_code = 500
-                return response
-            esPID = check_proc(pidESLoc)
-            if not esPID:
-                app.logger.error("[%s] : [ERROR] Can't read pidfile for es core",
-                                 datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-                response = jsonify({'Status': 'Error', 'Message': 'Cannot read escore pid file'})
-                response.status_code = 500
-                return response
-            qESCoreStart.ESCorePID = esPID
-            qESCoreStart.ESCoreStatus = 'Running'
-            response = jsonify({'Status': 'ES Core Started', 'PID': esPID})
-            response.status_code = 201
-            return response
+        esPID = -1
+        qESCoreStart.ESCorePID = esPID
+        qESCoreStart.ESCoreStatus = 'Running'
+        response = jsonify({'Status': 'ES Core Started', 'PID': esPID})
+        response.status_code = 201
+        return response
 
 
 @dmon.route('/v2/overlord/core/es/<hostFQDN>/stop')
