@@ -96,9 +96,7 @@ echo "Installing Elasticsearch plugin marvel ....."
 /opt/kibana/bin/kibana plugin --install elastic/sense
             
 echo "Setting up init script for dmon-es ..."
-cp $DMONHOME/src/init/dmon-es /etc/init.d/dmon-es
-chmod +x /etc/init.d/dmon-es
-update-rc.d dmon-es defaults 96 9
+cp $DMONHOME/src/init/dmon-es.conf /etc/init/dmon-es.conf
 
 # Install Logstash
 echo "Installing Logstash..."
@@ -108,14 +106,12 @@ tar zxf logstash-2.2.1.tar.gz
 ln -sf logstash-2.2.1 logstash
 
 echo "Setting up init script for dmon-ls ..."
-cp $DMONHOME/src/init/dmon-ls /etc/init.d/dmon-ls
-chmod +x /etc/init.d/dmon-ls
-update-rc.d dmon-ls defaults 96 9
+cp $DMONHOME/src/init/dmon-ls.conf /etc/init/dmon-ls.conf
 
 #Setup Logrotate
 echo "Setting up logrotate ..."
 
-echo "/opt/IeAT-DICE-Repository/src/logs/logstash.log{
+echo "/opt/DICE-Monitoring/src/logs/logstash.log{
 size 20M
 create 777 ubuntu ubuntu
 rotate 4
