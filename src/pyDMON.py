@@ -2655,7 +2655,7 @@ class ESCoreControllerInit(Resource):
         os.environ['ES_HEAP_SIZE'] = qESCore.ESCoreHeap
 
         try:
-            subprocess.check_call(["service", "dmon-es", "restart",
+            subprocess.check_call(["initctl", "restart", "dmon-es",
                 "heap_size={}".format(qESCore.ESCoreHeap)])
         except Exception as inst:
             app.logger.error("[%s] : [ERROR] Cannot restart ES Core service with %s and %s",
@@ -3972,7 +3972,7 @@ class LSCoreControllerInit(Resource):
         lsPIDFileLoc = os.path.join(pidDir, 'logstash.pid')
 
         try:
-            subprocess.check_call(["service", "dmon-ls", "restart",
+            subprocess.check_call(["initctl ", "restart", "dmon-ls",
                 "heap_size={}".format(qSCore.LSCoreHeap),
                 "core_workers={}".format(qSCore.LSCoreWorkers)])
         except Exception as inst:
