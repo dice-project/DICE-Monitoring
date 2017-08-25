@@ -1,3 +1,8 @@
+tosca_definitions_version: cloudify_dsl_1_3
+
+imports:
+  - https://github.com/dice-project/DICE-Deployment-Cloudify/releases/download/0.7.1/full.yaml
+
 inputs:
 
   cluster_name:
@@ -56,12 +61,14 @@ node_types:
     properties:
       rules:
         default:
-          - remote_ip_prefix: 0.0.0.0/0
-            port_range_min: 5000
-            port_range_max: 5002
-          - remote_ip_prefix: 0.0.0.0/0
+          - ip_prefix: 0.0.0.0/0
+            from_port: 5000
+            to_port: 5002
+            protocol: tcp
+          - ip_prefix: 0.0.0.0/0
             port: 5601
-          - remote_ip_prefix: 0.0.0.0/0
+            protocol: tcp
+          - ip_prefix: 0.0.0.0/0
             port: 25826
             protocol: udp
 
@@ -75,7 +82,7 @@ node_templates:
     type: dice.firewall_rules.dmon.Core
 
   dmon_vm:
-    type: dice.hosts.Large
+    type: dice.hosts.ubuntu.Large
     relationships:
       - type: dice.relationships.ProtectedBy
         target: dmon_firewall
@@ -91,10 +98,13 @@ node_templates:
 
 outputs:
 
+  dmon_address:
+    description: Internal address of the DICE Monitoring services host
+    value: { get_attribute: [ dmon_vm, ip ] }
   kibana_url:
     description: Address of the Kibana web interface
     value:
       concat:
        - "http://"
-       - { get_attribute: [ dmon_ip, floating_ip_address ] }
+       - { get_attribute: [ dmon_ip, address ] }
        - ":5601"
