@@ -574,24 +574,54 @@ class FetchStormLogsSDAll(Resource):
         stDir = os.getenv('STORM_LOG', stormLogDir)
         app.logger.warning('[%s] : [WARN] Storm log directory set to %s',
                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), stDir)
-        lFile = []
-        workerFile = 'worker-*.log'
-        # logFile = os.path.join(stDir, workerFile)
-        for name in glob.glob(os.path.join(stDir, workerFile)):
-            lFile.append(name)
-        if not lFile:
-            app.logger.warning('[%s] : [WARN] No Storm worker logs found',
-                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
-            response = jsonify({'Status': 'No Storm worker logs found'})
+
+        log_packers = {
+            '0.9': FetchStormLogsSDAll._packageLogs09,
+            '1.0': FetchStormLogsSDAll._packageLogs10,
+        }
+        storm_version = os.getenv('STORM_VERSION', '0.9')
+        if storm_version not in log_packers:
+            app.logger.warning(
+                '[%s] : [WARN] Storm version %s is not supported %s: ',
+                datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                storm_version
+            )
+            response = jsonify({'Status': 'Not Implemented',
+                                'Message': 'Unsupported storm version'})
+            response.status_code = 501
+            return response
+
+        try:
+            logs = log_packers[storm_version](stDir)
+            return send_file(logs, as_attachment=True,
+                             mimetype='application/tar')
+        except ValueError as e:
+            response = jsonify({'Status': 'Not Found', 'Message': str(e)})
             response.status_code = 404
             return response
 
+    @staticmethod
+    def _ensureEmptyTarlog():
         tmpDir = tempfile.gettempdir()
         tarlog = os.path.join(tmpDir, 'workerlogs.tar')
         if os.path.isfile(tarlog):
             os.remove(tarlog)
             app.logger.warning('[%s] : [WARN] Old Storm workerlog detected and removed',
                                datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+        return tarlog
+
+    @staticmethod
+    def _packageLogs09(stDir):
+        lFile = []
+        workerFile = 'worker-*.log'
+        for name in glob.glob(os.path.join(stDir, workerFile)):
+            lFile.append(name)
+        if not lFile:
+            app.logger.warning('[%s] : [WARN] No Storm worker logs found',
+                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'))
+            raise ValueError('No Storm worker logs found')
+
+        tarlog = FetchStormLogsSDAll._ensureEmptyTarlog()
         out = tarfile.open(tarlog, mode='w')
         try:
             for file in lFile:
@@ -601,15 +631,22 @@ class FetchStormLogsSDAll(Resource):
             out.close()
             app.logger.info('[%s] : [INFO] Storm log tar file created at %s containing %s',
                              datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(tarlog), str(lFile))
-        if not os.path.isfile(tarlog):
-            app.logger.warning('[%s] : [WARN] Storm logfile tar not found at %s: ',
-                            datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'), str(tarlog))
+        return tarlog
 
-            response = jsonify({'Status': 'Not Found', 'Message': 'No storm tar logfile found'})
-            response.status_code = 404
-            return response
-        path, filename = os.path.split(tarlog)
-        return send_from_directory(tmpDir, filename, as_attachment=True, mimetype='application/tar')
+    @staticmethod
+    def _packageLogs10(logPath):
+        if not os.path.exists(os.path.join(logPath, 'workers-artifacts')):
+            raise ValueError('No Storm log files found')
+
+        tarlog = FetchStormLogsSDAll._ensureEmptyTarlog()
+        with tarfile.open(tarlog, mode='w') as out:
+            filename = os.path.split(logPath)[1]
+            out.add(logPath, arcname=filename)
+            app.logger.info(
+                '[%s] : [INFO] Storm log tar file created at %s containing %s',
+                datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S'),
+                tarlog, logPath)
+        return tarlog
 
 
 @agent.route('/v3/bdp/storm/logs')
